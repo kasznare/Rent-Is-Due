@@ -19,6 +19,7 @@ This file tracks the active roadmap for the static-hosted prototype. It is meant
 - [x] Make ownership decisions matter after purchase
 - [x] Persist setup state and last-match summaries between sessions
 - [x] Document the static-path architecture and the future multiplayer fork
+- [x] Redesign the play surface around a fixed board with overlay-driven secondary systems
 
 ## Next Backlog
 

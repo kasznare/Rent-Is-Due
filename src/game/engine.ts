@@ -15,6 +15,7 @@ import type {
   LoanSize,
   LogEntry,
   MarketListing,
+  PendingMove,
   PlayerState,
   PropertyStrategy,
   RoundSummary,
@@ -84,8 +85,55 @@ const getPlayer = (state: GameState, playerId: string) =>
 const getTile = (state: GameState, tileId: number) =>
   state.tiles.find((tile) => tile.id === tileId)
 
+const getCurrentCursorPosition = (state: GameState, playerId: string) =>
+  state.pendingMove?.playerId === playerId
+    ? state.pendingMove.cursorPosition
+    : getPlayer(state, playerId)?.position ?? 0
+
 const getOwnedTiles = (state: GameState, playerId: string) =>
   state.tiles.filter((tile) => tile.ownerId === playerId)
+
+const getAdjacentTileIds = (state: GameState, tileId: number) => {
+  const tile = getTile(state, tileId)
+
+  if (!tile) {
+    return []
+  }
+
+  return state.tiles
+    .filter(
+      (candidate) =>
+        Math.abs(candidate.gridX - tile.gridX) + Math.abs(candidate.gridY - tile.gridY) === 1,
+    )
+    .map((candidate) => candidate.id)
+}
+
+const getDirectionalDestination = (
+  state: GameState,
+  tileId: number,
+  direction: 'up' | 'down' | 'left' | 'right',
+) => {
+  const tile = getTile(state, tileId)
+
+  if (!tile) {
+    return null
+  }
+
+  const deltaByDirection = {
+    up: { x: 0, y: -1 },
+    down: { x: 0, y: 1 },
+    left: { x: -1, y: 0 },
+    right: { x: 1, y: 0 },
+  } as const
+
+  const delta = deltaByDirection[direction]
+  return (
+    state.tiles.find(
+      (candidate) =>
+        candidate.gridX === tile.gridX + delta.x && candidate.gridY === tile.gridY + delta.y,
+    )?.id ?? null
+  )
+}
 
 const getEconomySnapshot = (effects: ActiveEffect[]) =>
   effects.reduce(
@@ -142,6 +190,13 @@ const getMoveCooldown = (player: PlayerState) => {
   const stabilityPenalty = player.stability < 36 ? 1 : 0
   const survivalPenalty = player.survivalRounds > 0 ? 1 : 0
   return base + stabilityPenalty + survivalPenalty
+}
+
+const rollMoveBudget = (state: GameState, player: PlayerState) => {
+  const base = randInt(state, 2, 4)
+  const jobBonus = player.jobId === 'freelance' ? 1 : 0
+  const stabilityPenalty = player.stability < 35 ? 1 : 0
+  return clamp(base + jobBonus - stabilityPenalty, 1, 5)
 }
 
 const getGigCooldown = (player: PlayerState) =>
@@ -476,10 +531,36 @@ const processLanding = (state: GameState, player: PlayerState) => {
   }
 }
 
-const movePlayer = (state: GameState, playerId: string) => {
+const finalizePlannedMove = (state: GameState, playerId: string) => {
+  const player = getPlayer(state, playerId)
+  const plan = state.pendingMove
+
+  if (!player || !plan || plan.playerId !== playerId) {
+    return
+  }
+  player.position = plan.cursorPosition
+  player.moveCooldown = getMoveCooldown(player)
+  addLog(
+    state,
+    `${player.name} moved ${plan.route.length - 1} blocks through the grid.`,
+    player.isHuman ? 'neutral' : 'good',
+  )
+  processLanding(state, player)
+  state.pendingMove = null
+  normalizePlayerState(player)
+}
+
+const startPlannedMove = (state: GameState, playerId: string) => {
   const player = getPlayer(state, playerId)
 
   if (!player) {
+    return
+  }
+
+  if (state.pendingMove) {
+    if (player.isHuman) {
+      addAlert(state, 'Finish the current route before starting a new one.')
+    }
     return
   }
 
@@ -493,18 +574,105 @@ const movePlayer = (state: GameState, playerId: string) => {
     return
   }
 
-  const roll = randInt(state, 1, 6)
-  const previousPosition = player.position
-  player.position = (player.position + roll) % state.tiles.length
-  player.moveCooldown = getMoveCooldown(player)
-
-  if (player.position < previousPosition) {
-    player.cash += 55
-    player.stability += 2
-    addLog(state, `${player.name} looped the board and banked ${money(55)}.`, 'good')
+  const budget = rollMoveBudget(state, player)
+  const plan: PendingMove = {
+    playerId,
+    rolledSteps: budget,
+    stepsRemaining: budget,
+    cursorPosition: player.position,
+    route: [player.position],
   }
 
-  addLog(state, `${player.name} moved ${roll} spaces.`, player.isHuman ? 'neutral' : 'good')
+  state.pendingMove = plan
+
+  if (player.isHuman) {
+    addAlert(state, `Route open: ${budget} blocks. Use the arrows to navigate the grid.`)
+  }
+}
+
+const stepPlannedMove = (
+  state: GameState,
+  playerId: string,
+  direction: 'up' | 'down' | 'left' | 'right',
+) => {
+  const plan = state.pendingMove
+
+  if (!plan || plan.playerId !== playerId) {
+    return
+  }
+
+  const destinationId = getDirectionalDestination(state, plan.cursorPosition, direction)
+
+  if (destinationId === null) {
+    addAlert(state, `That avenue is blocked. Pick another direction.`)
+    return
+  }
+
+  plan.cursorPosition = destinationId
+  plan.route = [...plan.route, destinationId]
+  plan.stepsRemaining -= 1
+
+  if (plan.stepsRemaining <= 0) {
+    finalizePlannedMove(state, playerId)
+  }
+}
+
+const chooseAiRoute = (state: GameState, player: PlayerState) => {
+  const budget = rollMoveBudget(state, player)
+  let current = player.position
+  const route = [current]
+
+  for (let step = 0; step < budget; step += 1) {
+    const options = getAdjacentTileIds(state, current)
+      .map((tileId) => getTile(state, tileId))
+      .filter((tile): tile is NonNullable<typeof tile> => tile !== undefined)
+      .sort((left, right) => {
+        const leftWeight =
+          (left.type === 'event' ? 4 : 0) +
+          (left.type === 'market' ? 5 : 0) +
+          (player.archetype === 'asset-hunter' && left.type === 'property' ? 3 : 0) +
+          (player.archetype === 'stability' && left.demand === 'low' ? 2 : 0)
+        const rightWeight =
+          (right.type === 'event' ? 4 : 0) +
+          (right.type === 'market' ? 5 : 0) +
+          (player.archetype === 'asset-hunter' && right.type === 'property' ? 3 : 0) +
+          (player.archetype === 'stability' && right.demand === 'low' ? 2 : 0)
+        return rightWeight - leftWeight
+      })
+
+    const preferred = options[0]
+    const fallback = options[Math.floor(nextRandom(state) * options.length)]
+    current = chance(state, 0.68) && preferred ? preferred.id : fallback?.id ?? current
+    route.push(current)
+  }
+
+  return {
+    budget,
+    route,
+    finalPosition: current,
+  }
+}
+
+const movePlayer = (state: GameState, playerId: string) => {
+  const player = getPlayer(state, playerId)
+
+  if (!player) {
+    return
+  }
+
+  if (player.isHuman) {
+    startPlannedMove(state, playerId)
+    return
+  }
+
+  if (player.workLock > 0 || player.skipActions > 0 || player.moveCooldown > 0) {
+    return
+  }
+
+  const route = chooseAiRoute(state, player)
+  player.position = route.finalPosition
+  player.moveCooldown = getMoveCooldown(player)
+  addLog(state, `${player.name} moved ${route.budget} blocks through the grid.`, 'good')
   processLanding(state, player)
   normalizePlayerState(player)
 }
@@ -1349,6 +1517,7 @@ export const createInitialGame = (config: GameConfig): GameState => {
       strategy: 'extract',
     })),
     players: [humanPlayer, ...aiPlayers],
+    pendingMove: null,
     marketListings: [],
     activeEffects: [],
     currentHeadline: 'Opening week',
@@ -1423,6 +1592,21 @@ export const performMove = (game: GameState) =>
     movePlayer(next, HUMAN_ID)
   })
 
+export const performMoveStep = (
+  game: GameState,
+  direction: 'up' | 'down' | 'left' | 'right',
+) =>
+  cloneAndApply(game, (next) => {
+    stepPlannedMove(next, HUMAN_ID, direction)
+  })
+
+export const performMoveSettle = (game: GameState) =>
+  cloneAndApply(game, (next) => {
+    if (next.pendingMove?.playerId === HUMAN_ID) {
+      finalizePlannedMove(next, HUMAN_ID)
+    }
+  })
+
 export const performGig = (game: GameState) =>
   cloneAndApply(game, (next) => {
     gigForPlayer(next, HUMAN_ID)
@@ -1481,6 +1665,29 @@ export const formatTime = (seconds: number) => {
 }
 
 export const getHumanPlayer = (state: GameState) => getHuman(state)
+
+export const getDisplayedPlayerPosition = (state: GameState, playerId: string) =>
+  getCurrentCursorPosition(state, playerId)
+
+export const getHumanMoveOptions = (state: GameState) => {
+  const human = getHuman(state)
+
+  if (!human || !state.pendingMove || state.pendingMove.playerId !== human.id) {
+    return {
+      up: null,
+      down: null,
+      left: null,
+      right: null,
+    }
+  }
+
+  return {
+    up: getDirectionalDestination(state, state.pendingMove.cursorPosition, 'up'),
+    down: getDirectionalDestination(state, state.pendingMove.cursorPosition, 'down'),
+    left: getDirectionalDestination(state, state.pendingMove.cursorPosition, 'left'),
+    right: getDirectionalDestination(state, state.pendingMove.cursorPosition, 'right'),
+  }
+}
 
 export const getUpcomingLivingCost = (state: GameState, player: PlayerState) => {
   const economy = getEconomySnapshot(state.activeEffects)

@@ -12,6 +12,8 @@ import {
   createLastMatchSnapshot,
   formatMoney,
   formatTime,
+  getDisplayedPlayerPosition,
+  getHumanMoveOptions,
   getHumanPlayer,
   getOwnedProperties,
   getPassiveIncomeValue,
@@ -25,6 +27,8 @@ import {
   performGig,
   performLoan,
   performMove,
+  performMoveSettle,
+  performMoveStep,
   performPropertyStrategy,
   performPropertyUpgrade,
   performRoommateRequest,
@@ -50,11 +54,15 @@ import {
   saveTutorialDismissed,
 } from './storage'
 
+type OverlayKey = 'market' | 'social' | 'assets' | 'feed' | 'standings' | 'summary'
+
 type Action =
   | { type: 'clear' }
   | { type: 'start'; config: GameConfig }
   | { type: 'tick' }
   | { type: 'move' }
+  | { type: 'move-step'; direction: 'up' | 'down' | 'left' | 'right' }
+  | { type: 'move-settle' }
   | { type: 'gig' }
   | { type: 'loan'; size: LoanSize }
   | { type: 'buyout'; tileId: number }
@@ -86,6 +94,14 @@ const gameReducer = (state: GameState | null, action: Action) => {
 
   if (action.type === 'move') {
     return performMove(state)
+  }
+
+  if (action.type === 'move-step') {
+    return performMoveStep(state, action.direction)
+  }
+
+  if (action.type === 'move-settle') {
+    return performMoveSettle(state)
   }
 
   if (action.type === 'gig') {
@@ -141,7 +157,7 @@ const getRiskState = (player: PlayerState, nextBill: number) => {
 
 const getStatusText = (player: PlayerState) => {
   if (player.survivalRounds > 0) {
-    return `Survival Mode ${player.survivalRounds}r`
+    return `Survival ${player.survivalRounds}r`
   }
 
   if (player.livingStatus === 'owner') {
@@ -155,77 +171,17 @@ const getStatusText = (player: PlayerState) => {
   return 'Solo'
 }
 
-const getRoleText = (player: PlayerState) => {
-  if (player.isHuman) {
-    return 'You'
-  }
+const getRoleText = (player: PlayerState) =>
+  player.isHuman ? 'You' : player.archetype.replace('-', ' ')
 
-  return player.archetype.replace('-', ' ')
-}
-
-const getMoveHint = (player: PlayerState) => {
-  if (player.workLock > 0) {
-    return `Working for ${player.workLock} ticks`
-  }
-
-  if (player.skipActions > 0) {
-    return `Burnout lock for ${player.skipActions} ticks`
-  }
-
-  if (player.moveCooldown > 0) {
-    return `Move ready in ${player.moveCooldown} ticks`
-  }
-
-  return 'Ready now'
-}
-
-const getGigHint = (player: PlayerState) => {
-  if (player.workLock > 0) {
-    return `Job lock for ${player.workLock} ticks`
-  }
-
-  if (player.skipActions > 0) {
-    return `Burnout lock for ${player.skipActions} ticks`
-  }
-
-  if (player.gigCooldown > 0) {
-    return `Gig ready in ${player.gigCooldown} ticks`
-  }
-
-  return 'Ready now'
-}
-
-const getLargeLoanHint = (player: PlayerState) => {
-  if (player.survivalRounds > 0) {
-    return 'Blocked in Survival Mode'
-  }
-
-  if (player.creditScore <= 600) {
-    return 'Needs 600+ credit'
-  }
-
-  if (player.debt >= 540) {
-    return 'Debt ceiling reached'
-  }
-
-  return 'Available'
-}
-
-const getSupportHint = (player: PlayerState) => {
-  if (player.cash < 24) {
-    return 'Need $24 cash to build trust'
-  }
-
-  return 'Use cash to improve future deals'
-}
-
-const createRandomSeed = () => `seed-${Date.now().toString(36)}`
+const createRandomSeed = () => `nyc-${Date.now().toString(36)}`
 
 function App() {
   const [draft, setDraft] = useState<GameConfig>(() => loadDraft())
   const [game, dispatch] = useReducer(gameReducer, null, () => loadSavedGame())
   const [speed, setSpeed] = useState(2)
   const [paused, setPaused] = useState(false)
+  const [overlay, setOverlay] = useState<OverlayKey | null>(null)
   const [lastMatch, setLastMatch] = useState<LastMatchSnapshot | null>(() => loadLastMatch())
   const [showTutorial, setShowTutorial] = useState(() => !loadTutorialDismissed())
   const clockPaused = paused || game?.phase === 'finished'
@@ -270,12 +226,14 @@ function App() {
 
   const clearToLobby = () => {
     persistFinishedGame(game)
+    setOverlay(null)
     setPaused(false)
     startTransition(() => dispatch({ type: 'clear' }))
   }
 
   const startMatch = (config: GameConfig) => {
     persistFinishedGame(game)
+    setOverlay(null)
     setPaused(false)
     startTransition(() => dispatch({ type: 'start', config }))
   }
@@ -306,50 +264,54 @@ function App() {
       )
     : []
   const ownedProperties = game && human ? getOwnedProperties(game, human.id) : []
-  const winner =
-    game?.phase === 'finished'
-      ? sortedPlayers[0] ?? null
-      : null
+  const moveOptions = game ? getHumanMoveOptions(game) : null
+  const humanPendingMove =
+    game && human && game.pendingMove?.playerId === human.id ? game.pendingMove : null
+  const winner = game?.phase === 'finished' ? sortedPlayers[0] ?? null : null
   const canLargeLoan = human
-    ? human.creditScore > 600 &&
-      human.debt < 540 &&
-      human.survivalRounds === 0
+    ? human.creditScore > 600 && human.debt < 540 && human.survivalRounds === 0
     : false
 
   return (
     <div className="app-shell">
       {game ? (
         <>
-          <header className="topbar">
-            <div className="topbar__title">
+          <header className="city-header">
+            <div className="city-header__title">
               <p className="eyebrow">Gen Z Monopoly</p>
-              <h1>Rent is due. The clock never stops.</h1>
-              <p className="lede">
-                Seeded simulation build. Runs are now reproducible, round summaries
-                persist, and the housing loop is tuned to be harsh without instantly
-                collapsing every player.
-              </p>
+              <h1>Move the grid. Hold the rent line.</h1>
             </div>
 
-            <div className="topbar__meta">
-              <div className="pillbox">
+            <div className="city-header__stats">
+              <div className="hud-card">
+                <span>Cash</span>
+                <strong>{formatMoney(human?.cash ?? 0)}</strong>
+              </div>
+              <div className="hud-card">
+                <span>Debt</span>
+                <strong>{formatMoney(human?.debt ?? 0)}</strong>
+              </div>
+              <div className="hud-card">
+                <span>Next bill</span>
+                <strong>{formatMoney(nextBill)}</strong>
+              </div>
+              <div className="hud-card">
                 <span>Round</span>
                 <strong>
-                  {game.round} / {game.totalRounds}
+                  {game.round}/{game.totalRounds}
                 </strong>
               </div>
-              <div className="pillbox">
+              <div className="hud-card">
                 <span>Next round</span>
                 <strong>{nextRoundLabel}</strong>
               </div>
-              <div className="pillbox">
+              <div className="hud-card">
                 <span>Seed</span>
                 <strong>{game.config.seed}</strong>
               </div>
-              <div className="pillbox">
-                <span>Elapsed</span>
-                <strong>{formatTime(game.gameSecondsElapsed)}</strong>
-              </div>
+            </div>
+
+            <div className="city-header__actions">
               <div className="speed-switch">
                 {SPEED_OPTIONS.map((option) => (
                   <button
@@ -374,570 +336,510 @@ function App() {
                     ? 'Resume'
                     : 'Pause'}
               </button>
-              <button
-                className="secondary"
-                onClick={() => setShowTutorial(true)}
-                type="button"
-              >
+              <button className="secondary" onClick={() => setShowTutorial(true)} type="button">
                 Guide
               </button>
-              <button
-                className="secondary"
-                onClick={clearToLobby}
-                type="button"
-              >
-                Back to lobby
+              <button className="secondary" onClick={clearToLobby} type="button">
+                Lobby
               </button>
             </div>
           </header>
 
-          <main className="dashboard">
-            <section className="panel panel--board">
-              <div className="panel__header">
+          <main className="city-layout">
+            <section className="city-stage">
+              <div className="city-stage__head">
                 <div>
-                  <p className="eyebrow">Board</p>
-                  <h2>Heatmap of rent pressure</h2>
+                  <p className="eyebrow">City board</p>
+                  <h2>{game.currentHeadline ?? 'Noisy calm'}</h2>
                 </div>
-                <div className="headline-card">
-                  <span>Headline</span>
-                  <strong>{game.currentHeadline ?? 'Noisy calm'}</strong>
+                <div className={`status-chip status-chip--${riskState}`}>
+                  {human ? getStatusText(human) : 'Watching'}
                 </div>
               </div>
 
-              <div className="effects-row">
-                {game.activeEffects.length > 0 ? (
-                  game.activeEffects.map((effect) => (
-                    <article className="effect-card" key={effect.id}>
-                      <span>{effect.remainingRounds}r</span>
-                      <strong>{effect.title}</strong>
-                      <p>{effect.description}</p>
-                    </article>
-                  ))
-                ) : (
-                  <article className="effect-card effect-card--muted">
-                    <span>0r</span>
-                    <strong>No active macro shock</strong>
-                    <p>The economy is still bad, just not unusually bad.</p>
-                  </article>
-                )}
-              </div>
+              {humanPendingMove ? (
+                <div className="route-banner">
+                  <strong>{humanPendingMove.stepsRemaining} blocks left</strong>
+                  <p>
+                    Route: {humanPendingMove.route.map((tileId) => game.tiles[tileId]?.name).join(' -> ')}
+                  </p>
+                </div>
+              ) : null}
 
-              <div className="board-grid">
+              <div className="city-board">
                 {game.tiles.map((tile) => {
-                  const occupants = game.players.filter(
-                    (player) => player.position === tile.id,
-                  )
                   const owner = tile.ownerId
                     ? game.players.find((player) => player.id === tile.ownerId) ?? null
                     : null
+                  const occupants = game.players.filter(
+                    (player) => getDisplayedPlayerPosition(game, player.id) === tile.id,
+                  )
+                  const routeIndex = humanPendingMove
+                    ? humanPendingMove.route.indexOf(tile.id)
+                    : -1
 
                   return (
                     <article
-                      className={`tile tile--${tile.type} tile--${tile.demand}`}
+                      className={`block block--${tile.type} block--${tile.demand} ${
+                        routeIndex >= 0 ? 'block--route' : ''
+                      } ${humanPendingMove?.cursorPosition === tile.id ? 'block--cursor' : ''}`}
                       key={tile.id}
+                      style={{
+                        gridColumn: tile.gridX + 1,
+                        gridRow: tile.gridY + 1,
+                        ['--tower-height' as string]: `${48 + tile.skyline * 12 + tile.upgradeLevel * 12}px`,
+                      }}
                     >
-                      <div className="tile__meta">
-                        <span className="tile__index">{tile.id}</span>
-                        <span className="tile__district">{tile.district}</span>
+                      <div className="block__tower" aria-hidden="true">
+                        <div className="block__roof" />
+                        <div className="block__front" />
+                        <div className="block__side" />
                       </div>
-                      <h3>{tile.name}</h3>
-                      <p>{tile.flavor}</p>
-                      <div className="tile__footer">
-                        {tile.type === 'property' ? (
-                          <>
-                            <strong>{formatMoney(tile.currentRent)}</strong>
-                            <span>
-                              {owner
-                                ? `${owner.name} · ${tile.strategy} · U${tile.upgradeLevel}`
-                                : 'Market-owned'}
-                            </span>
-                          </>
-                        ) : tile.type === 'market' ? (
-                          <>
-                            <strong>Market</strong>
-                            <span>Generates buyout windows</span>
-                          </>
-                        ) : (
-                          <>
-                            <strong>Event</strong>
-                            <span>Random pressure or relief</span>
-                          </>
-                        )}
-                      </div>
-                      {tile.listed ? <div className="tile__tag">Listed</div> : null}
-                      <div className="tile__tokens">
-                        {occupants.map((player) => (
-                          <span
-                            key={player.id}
-                            className="token"
-                            style={{ backgroundColor: player.color }}
-                            title={player.name}
-                          >
-                            {player.name.slice(0, 1)}
+                      <div className="block__content">
+                        <div className="block__labels">
+                          <span>
+                            {tile.gridX + 1} / {tile.gridY + 1}
                           </span>
-                        ))}
+                          <span>{tile.district}</span>
+                        </div>
+                        <h3>{tile.name}</h3>
+                        <p>{tile.flavor}</p>
+                        <div className="block__meta">
+                          {tile.type === 'property' ? (
+                            <>
+                              <strong>{formatMoney(tile.currentRent)}</strong>
+                              <span>
+                                {owner
+                                  ? `${owner.name} · ${tile.strategy} · U${tile.upgradeLevel}`
+                                  : 'Market-owned'}
+                              </span>
+                            </>
+                          ) : tile.type === 'market' ? (
+                            <>
+                              <strong>Market</strong>
+                              <span>Listings and auctions</span>
+                            </>
+                          ) : (
+                            <>
+                              <strong>{tile.type === 'start' ? 'Start' : 'Event'}</strong>
+                              <span>Land here for an effect</span>
+                            </>
+                          )}
+                        </div>
+                        <div className="block__tokens">
+                          {occupants.map((player) => (
+                            <span
+                              key={player.id}
+                              className="token"
+                              style={{ backgroundColor: player.color }}
+                              title={player.name}
+                            >
+                              {player.name.slice(0, 1)}
+                            </span>
+                          ))}
+                        </div>
                       </div>
                     </article>
                   )
                 })}
               </div>
+
+              <div className="overlay-launcher">
+                <button className="secondary" onClick={() => setOverlay('market')} type="button">
+                  Market
+                </button>
+                <button className="secondary" onClick={() => setOverlay('social')} type="button">
+                  Social
+                </button>
+                <button className="secondary" onClick={() => setOverlay('assets')} type="button">
+                  Assets
+                </button>
+                <button className="secondary" onClick={() => setOverlay('standings')} type="button">
+                  Standings
+                </button>
+                <button className="secondary" onClick={() => setOverlay('feed')} type="button">
+                  Feed
+                </button>
+                <button className="secondary" onClick={() => setOverlay('summary')} type="button">
+                  Recap
+                </button>
+              </div>
             </section>
 
-            <section className="panel panel--controls">
+            <aside className="command-dock">
               {human ? (
                 <>
-                  <div className={`status-hero status-hero--${riskState}`}>
-                    <div>
-                      <p className="eyebrow">Your state</p>
-                      <h2>{human.name}</h2>
-                      <p className="risk-copy">
-                        {riskState === 'critical'
-                          ? 'You are operating inside hard constraints. Stabilize first.'
-                          : riskState === 'tight'
-                            ? 'You have options, but each one mortgages a future turn.'
-                            : 'You still have room to play for leverage instead of pure survival.'}
-                      </p>
-                    </div>
-                    <div className="status-badge">{getStatusText(human)}</div>
+                  <div className={`status-panel status-panel--${riskState}`}>
+                    <p className="eyebrow">Status</p>
+                    <h2>{human.name}</h2>
+                    <p>
+                      {riskState === 'critical'
+                        ? 'You are one bad payment away from another forced concession.'
+                        : riskState === 'tight'
+                          ? 'You still have agency, but every move costs future slack.'
+                          : 'You have enough runway to play for position rather than panic.'}
+                    </p>
                   </div>
 
-                  <div className="stats-grid">
-                    <article className="stat-card">
-                      <span>Cash</span>
-                      <strong>{formatMoney(human.cash)}</strong>
-                    </article>
-                    <article className="stat-card">
-                      <span>Debt</span>
-                      <strong>{formatMoney(human.debt)}</strong>
-                    </article>
-                    <article className="stat-card">
-                      <span>Credit</span>
-                      <strong>{human.creditScore}</strong>
-                    </article>
-                    <article className="stat-card">
+                  <div className="command-section">
+                    <p className="eyebrow">Movement</p>
+                    <button
+                      className="primary"
+                      disabled={Boolean(game.pendingMove) || human.moveCooldown > 0 || human.workLock > 0 || human.skipActions > 0}
+                      onClick={() => dispatch({ type: 'move' })}
+                      type="button"
+                    >
+                      Open route
+                      <span>
+                        {human.moveCooldown > 0
+                          ? `${human.moveCooldown} ticks cooldown`
+                          : 'Roll blocks, then steer the route'}
+                      </span>
+                    </button>
+
+                    <div className="arrow-pad">
+                      <button
+                        className="secondary"
+                        disabled={!moveOptions?.up}
+                        onClick={() => dispatch({ type: 'move-step', direction: 'up' })}
+                        type="button"
+                      >
+                        North
+                      </button>
+                      <div className="arrow-pad__middle">
+                        <button
+                          className="secondary"
+                          disabled={!moveOptions?.left}
+                          onClick={() => dispatch({ type: 'move-step', direction: 'left' })}
+                          type="button"
+                        >
+                          West
+                        </button>
+                        <button
+                          className="secondary"
+                          disabled={!game.pendingMove}
+                          onClick={() => dispatch({ type: 'move-settle' })}
+                          type="button"
+                        >
+                          Settle here
+                        </button>
+                        <button
+                          className="secondary"
+                          disabled={!moveOptions?.right}
+                          onClick={() => dispatch({ type: 'move-step', direction: 'right' })}
+                          type="button"
+                        >
+                          East
+                        </button>
+                      </div>
+                      <button
+                        className="secondary"
+                        disabled={!moveOptions?.down}
+                        onClick={() => dispatch({ type: 'move-step', direction: 'down' })}
+                        type="button"
+                      >
+                        South
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="command-section">
+                    <p className="eyebrow">Cash actions</p>
+                    <div className="command-grid">
+                      <button
+                        className="primary"
+                        disabled={human.gigCooldown > 0 || human.workLock > 0 || human.skipActions > 0}
+                        onClick={() => dispatch({ type: 'gig' })}
+                        type="button"
+                      >
+                        Work a gig
+                        <span>
+                          {human.gigCooldown > 0
+                            ? `${human.gigCooldown} ticks cooldown`
+                            : 'Fast cash with variance'}
+                        </span>
+                      </button>
+                      <button
+                        className="secondary"
+                        onClick={() => dispatch({ type: 'loan', size: 'small' })}
+                        type="button"
+                      >
+                        Small loan
+                        <span>Quick liquidity</span>
+                      </button>
+                      <button
+                        className="secondary"
+                        disabled={!canLargeLoan}
+                        onClick={() => dispatch({ type: 'loan', size: 'large' })}
+                        type="button"
+                      >
+                        Large loan
+                        <span>{canLargeLoan ? 'Unlocked' : 'Blocked right now'}</span>
+                      </button>
+                      <button
+                        className="secondary"
+                        disabled={Boolean(human.peerLoan)}
+                        onClick={() => dispatch({ type: 'bridge-loan' })}
+                        type="button"
+                      >
+                        Ask the table
+                        <span>Informal trust loan</span>
+                      </button>
+                      <button
+                        className="secondary"
+                        disabled={!human.peerLoan}
+                        onClick={() => dispatch({ type: 'repay-bridge' })}
+                        type="button"
+                      >
+                        Repay bridge
+                        <span>
+                          {human.peerLoan && outstandingLender
+                            ? `${formatMoney(human.peerLoan.amount)} to ${outstandingLender.name}`
+                            : 'Nothing outstanding'}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="command-strip">
+                    <div className="mini-stat">
                       <span>Stability</span>
                       <strong>{human.stability}</strong>
-                    </article>
-                    <article className="stat-card">
-                      <span>Next living tick</span>
-                      <strong>{formatMoney(nextBill)}</strong>
-                    </article>
-                    <article className="stat-card">
-                      <span>Round interest</span>
+                    </div>
+                    <div className="mini-stat">
+                      <span>Interest</span>
                       <strong>{Math.round(roundInterest * 100)}%</strong>
-                    </article>
-                    <article className="stat-card">
-                      <span>Passive / tick</span>
-                      <strong>{formatMoney(passiveIncome)}</strong>
-                    </article>
-                    <article className="stat-card">
+                    </div>
+                    <div className="mini-stat">
+                      <span>Passive</span>
+                      <strong>{formatMoney(passiveIncome)}/tick</strong>
+                    </div>
+                    <div className="mini-stat">
                       <span>Score</span>
                       <strong>{human.score}</strong>
-                    </article>
+                    </div>
                   </div>
 
                   {game.alerts.length > 0 ? (
-                    <div className="alerts">
+                    <div className="alert-stack">
                       {game.alerts.map((alert) => (
                         <p key={alert}>{alert}</p>
                       ))}
                     </div>
                   ) : null}
-
-                  <section className="subpanel">
-                    <div className="subpanel__header">
-                      <div>
-                        <p className="eyebrow">Action windows</p>
-                        <h3>What is open right now</h3>
-                      </div>
-                    </div>
-                    <div className="hint-grid">
-                      <article className="hint-card">
-                        <strong>Move</strong>
-                        <p>{getMoveHint(human)}</p>
-                      </article>
-                      <article className="hint-card">
-                        <strong>Gig</strong>
-                        <p>{getGigHint(human)}</p>
-                      </article>
-                      <article className="hint-card">
-                        <strong>Large loan</strong>
-                        <p>{getLargeLoanHint(human)}</p>
-                      </article>
-                      <article className="hint-card">
-                        <strong>Trust</strong>
-                        <p>{getSupportHint(human)}</p>
-                      </article>
-                    </div>
-                  </section>
-
-                  <div className="actions-grid">
-                    <button
-                      className="primary"
-                      disabled={human.moveCooldown > 0 || human.workLock > 0 || human.skipActions > 0}
-                      onClick={() => dispatch({ type: 'move' })}
-                      type="button"
-                    >
-                      Move
-                      <span>{getMoveHint(human)}</span>
-                    </button>
-
-                    <button
-                      className="primary"
-                      disabled={human.gigCooldown > 0 || human.workLock > 0 || human.skipActions > 0}
-                      onClick={() => dispatch({ type: 'gig' })}
-                      type="button"
-                    >
-                      Work a gig
-                      <span>{getGigHint(human)}</span>
-                    </button>
-
-                    <button
-                      className="secondary"
-                      onClick={() => dispatch({ type: 'loan', size: 'small' })}
-                      type="button"
-                    >
-                      Small loan
-                      <span>Fast approval, higher drag later</span>
-                    </button>
-
-                    <button
-                      className="secondary"
-                      disabled={!canLargeLoan}
-                      onClick={() => dispatch({ type: 'loan', size: 'large' })}
-                      type="button"
-                    >
-                      Large loan
-                      <span>{getLargeLoanHint(human)}</span>
-                    </button>
-
-                    <button
-                      className="secondary"
-                      disabled={Boolean(human.peerLoan)}
-                      onClick={() => dispatch({ type: 'bridge-loan' })}
-                      type="button"
-                    >
-                      Ask table for help
-                      <span>Generic bridge loan from the best-trusting rival</span>
-                    </button>
-
-                    <button
-                      className="secondary"
-                      disabled={!human.peerLoan}
-                      onClick={() => dispatch({ type: 'repay-bridge' })}
-                      type="button"
-                    >
-                      Repay bridge loan
-                      <span>
-                        {human.peerLoan && outstandingLender
-                          ? `${formatMoney(human.peerLoan.amount)} to ${outstandingLender.name}`
-                          : 'Nothing outstanding'}
-                      </span>
-                    </button>
-                  </div>
-
-                  <section className="subpanel">
-                    <div className="subpanel__header">
-                      <div>
-                        <p className="eyebrow">Market</p>
-                        <h3>Late-game buyouts</h3>
-                      </div>
-                      <span>{game.marketListings.length} open</span>
-                    </div>
-                    <div className="listing-grid">
-                      {game.marketListings.length > 0 ? (
-                        game.marketListings.map((listing) => {
-                          const tile = game.tiles.find((item) => item.id === listing.tileId)
-
-                          if (!tile) {
-                            return null
-                          }
-
-                          return (
-                            <article className="listing-card" key={listing.tileId}>
-                              <div>
-                                <p>{listing.tag}</p>
-                                <h4>{tile.name}</h4>
-                                <span>
-                                  {tile.district} · {tile.demand} demand
-                                </span>
-                              </div>
-                              <div className="listing-card__meta">
-                                <strong>{formatMoney(listing.price)}</strong>
-                                <span>Expires round {listing.expiresRound}</span>
-                              </div>
-                              <button
-                                className="secondary"
-                                onClick={() =>
-                                  dispatch({ type: 'buyout', tileId: listing.tileId })
-                                }
-                                type="button"
-                              >
-                                Buy from market
-                              </button>
-                            </article>
-                          )
-                        })
-                      ) : (
-                        <article className="listing-card listing-card--muted">
-                          <div>
-                            <p>No listing</p>
-                            <h4>The market is holding inventory</h4>
-                            <span>Auctions appear through events and round pressure.</span>
-                          </div>
-                        </article>
-                      )}
-                    </div>
-                  </section>
-
-                  <section className="subpanel">
-                    <div className="subpanel__header">
-                      <div>
-                        <p className="eyebrow">Ownership</p>
-                        <h3>Manage your holdings</h3>
-                      </div>
-                      <span>{ownedProperties.length} owned</span>
-                    </div>
-                    <div className="property-grid">
-                      {ownedProperties.length > 0 ? (
-                        ownedProperties.map((tile) => {
-                          const upgradeCost = getPropertyUpgradeCost(game, tile.id)
-                          const passivePerTile = getPropertyPassiveIncomeValue(game, tile.id)
-
-                          return (
-                            <article className="property-card" key={tile.id}>
-                              <div>
-                                <p>{tile.district}</p>
-                                <h4>{tile.name}</h4>
-                                <span>
-                                  Rent {formatMoney(tile.currentRent)} · Passive{' '}
-                                  {formatMoney(passivePerTile)} / tick
-                                </span>
-                              </div>
-                              <div className="property-card__stats">
-                                <span>Upgrade {tile.upgradeLevel} / 2</span>
-                                <span>Policy {tile.strategy}</span>
-                              </div>
-                              <div className="property-card__actions">
-                                <button
-                                  className="secondary"
-                                  disabled={tile.upgradeLevel >= 2}
-                                  onClick={() =>
-                                    dispatch({
-                                      type: 'upgrade-property',
-                                      tileId: tile.id,
-                                    })
-                                  }
-                                  type="button"
-                                >
-                                  Upgrade
-                                  <span>
-                                    {tile.upgradeLevel >= 2
-                                      ? 'Maxed'
-                                      : formatMoney(upgradeCost)}
-                                  </span>
-                                </button>
-                                <button
-                                  className="secondary"
-                                  onClick={() =>
-                                    dispatch({
-                                      type: 'property-strategy',
-                                      tileId: tile.id,
-                                      strategy:
-                                        tile.strategy === 'extract'
-                                          ? 'stabilize'
-                                          : 'extract',
-                                    })
-                                  }
-                                  type="button"
-                                >
-                                  {tile.strategy === 'extract'
-                                    ? 'Switch to stabilize'
-                                    : 'Switch to extract'}
-                                  <span>
-                                    {tile.strategy === 'extract'
-                                      ? 'Lower growth, steadier trust'
-                                      : 'Higher growth, harder pressure'}
-                                  </span>
-                                </button>
-                              </div>
-                            </article>
-                          )
-                        })
-                      ) : (
-                        <article className="property-card property-card--muted">
-                          <div>
-                            <h4>No owned properties</h4>
-                            <p>Buyouts unlock upgrades and policy choices.</p>
-                          </div>
-                        </article>
-                      )}
-                    </div>
-                  </section>
-
-                  <section className="subpanel">
-                    <div className="subpanel__header">
-                      <div>
-                        <p className="eyebrow">Social</p>
-                        <h3>Trust, support, and roommates</h3>
-                      </div>
-                      <span>
-                        {human.roommateWith
-                          ? `Sharing with ${
-                              game.players.find((player) => player.id === human.roommateWith)?.name
-                            }`
-                          : 'No pact'}
-                      </span>
-                    </div>
-                    <div className="roommate-grid">
-                      {availableRoommates.length > 0 ? (
-                        availableRoommates.map((player) => (
-                          <article className="roommate-card" key={player.id}>
-                            <div>
-                              <h4>{player.name}</h4>
-                              <p>{getRoleText(player)}</p>
-                            </div>
-                            <div className="roommate-card__stats">
-                              <span>Cash {formatMoney(player.cash)}</span>
-                              <span>Trust {player.trustInHuman}</span>
-                            </div>
-                            <div className="roommate-card__actions">
-                              <button
-                                className="secondary"
-                                onClick={() =>
-                                  dispatch({ type: 'roommate', partnerId: player.id })
-                                }
-                                type="button"
-                              >
-                                Pitch roommate deal
-                              </button>
-                              <button
-                                className="secondary"
-                                disabled={human.cash < 24}
-                                onClick={() =>
-                                  dispatch({ type: 'support', partnerId: player.id })
-                                }
-                                type="button"
-                              >
-                                Send support
-                              </button>
-                            </div>
-                          </article>
-                        ))
-                      ) : (
-                        <article className="roommate-card roommate-card--muted">
-                          <div>
-                            <h4>No available partners</h4>
-                            <p>The room is either housed, broke, or distrustful.</p>
-                          </div>
-                        </article>
-                      )}
-                    </div>
-                  </section>
                 </>
               ) : null}
-            </section>
-
-            <aside className="sidebar">
-              <section className="panel panel--leaderboard">
-                <div className="panel__header">
-                  <div>
-                    <p className="eyebrow">Standings</p>
-                    <h2>Scoreboard</h2>
-                  </div>
-                </div>
-                <div className="leaderboard">
-                  {sortedPlayers.map((player, index) => (
-                    <article
-                      className={`leaderboard-card ${
-                        player.isHuman ? 'leaderboard-card--human' : ''
-                      }`}
-                      key={player.id}
-                    >
-                      <div className="leaderboard-card__top">
-                        <div className="identity">
-                          <span
-                            className="identity__dot"
-                            style={{ backgroundColor: player.color }}
-                          />
-                          <div>
-                            <strong>
-                              #{index + 1} {player.name}
-                            </strong>
-                            <p>
-                              {getRoleText(player)} · {JOBS[player.jobId].name}
-                            </p>
-                          </div>
-                        </div>
-                        <span className="leaderboard-card__score">{player.score}</span>
-                      </div>
-                      <div className="leaderboard-card__stats">
-                        <span>Cash {formatMoney(player.cash)}</span>
-                        <span>Debt {formatMoney(player.debt)}</span>
-                        <span>{getStatusText(player)}</span>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              </section>
-
-              <section className="panel panel--summary">
-                <div className="panel__header">
-                  <div>
-                    <p className="eyebrow">Round recap</p>
-                    <h2>Recent rounds</h2>
-                  </div>
-                  <span>{game.roundSummaries.length} stored</span>
-                </div>
-                <div className="summary-stream">
-                  {game.roundSummaries.length > 0 ? (
-                    game.roundSummaries.map((summary) => (
-                      <article className="summary-card" key={summary.id}>
-                        <div className="summary-card__top">
-                          <strong>Round {summary.round}</strong>
-                          <span>{summary.headline ?? 'No headline'}</span>
-                        </div>
-                        <div className="summary-card__leaders">
-                          {summary.players.slice(0, 2).map((player) => (
-                            <p key={player.id}>
-                              {player.name}: {player.score}
-                            </p>
-                          ))}
-                        </div>
-                        <div className="summary-card__notes">
-                          {summary.notes.map((note) => (
-                            <p key={note}>{note}</p>
-                          ))}
-                        </div>
-                      </article>
-                    ))
-                  ) : (
-                    <article className="summary-card summary-card--muted">
-                      <p>Round summaries appear after each completed round.</p>
-                    </article>
-                  )}
-                </div>
-              </section>
-
-              <section className="panel panel--log">
-                <div className="panel__header">
-                  <div>
-                    <p className="eyebrow">Feed</p>
-                    <h2>Event log</h2>
-                  </div>
-                  <span>{game.logs.length} entries</span>
-                </div>
-                <div className="log-stream">
-                  {game.logs.map((entry) => (
-                    <article className={`log-entry log-entry--${entry.tone}`} key={entry.id}>
-                      <span>R{entry.round}</span>
-                      <p>{entry.message}</p>
-                    </article>
-                  ))}
-                </div>
-              </section>
             </aside>
           </main>
+
+          {overlay ? (
+            <div className="overlay">
+              <div className="overlay__card overlay__card--wide">
+                <div className="overlay__header">
+                  <div>
+                    <p className="eyebrow">Overlay</p>
+                    <h2>
+                      {overlay === 'market'
+                        ? 'Market'
+                        : overlay === 'social'
+                          ? 'Social'
+                          : overlay === 'assets'
+                            ? 'Assets'
+                            : overlay === 'standings'
+                              ? 'Standings'
+                              : overlay === 'summary'
+                                ? 'Round recap'
+                                : 'Event feed'}
+                    </h2>
+                  </div>
+                  <button className="secondary" onClick={() => setOverlay(null)} type="button">
+                    Close
+                  </button>
+                </div>
+
+                {overlay === 'market' ? (
+                  <div className="modal-grid">
+                    {game.marketListings.length > 0 ? (
+                      game.marketListings.map((listing) => {
+                        const tile = game.tiles.find((item) => item.id === listing.tileId)
+                        if (!tile) {
+                          return null
+                        }
+
+                        return (
+                          <article className="modal-card" key={listing.tileId}>
+                            <p>{listing.tag}</p>
+                            <h3>{tile.name}</h3>
+                            <span>
+                              {tile.district} · {tile.demand} demand · expires round{' '}
+                              {listing.expiresRound}
+                            </span>
+                            <strong>{formatMoney(listing.price)}</strong>
+                            <button
+                              className="secondary"
+                              onClick={() => dispatch({ type: 'buyout', tileId: listing.tileId })}
+                              type="button"
+                            >
+                              Buy from market
+                            </button>
+                          </article>
+                        )
+                      })
+                    ) : (
+                      <article className="modal-card modal-card--muted">
+                        <h3>No active listings</h3>
+                        <p>Auctions open through events and round pressure.</p>
+                      </article>
+                    )}
+                  </div>
+                ) : null}
+
+                {overlay === 'social' ? (
+                  <div className="modal-grid">
+                    {availableRoommates.length > 0 ? (
+                      availableRoommates.map((player) => (
+                        <article className="modal-card" key={player.id}>
+                          <p>{getRoleText(player)}</p>
+                          <h3>{player.name}</h3>
+                          <span>
+                            Cash {formatMoney(player.cash)} · Trust {player.trustInHuman}
+                          </span>
+                          <div className="modal-card__actions">
+                            <button
+                              className="secondary"
+                              onClick={() => dispatch({ type: 'roommate', partnerId: player.id })}
+                              type="button"
+                            >
+                              Pitch roommate pact
+                            </button>
+                            <button
+                              className="secondary"
+                              disabled={(human?.cash ?? 0) < 24}
+                              onClick={() => dispatch({ type: 'support', partnerId: player.id })}
+                              type="button"
+                            >
+                              Send support
+                            </button>
+                          </div>
+                        </article>
+                      ))
+                    ) : (
+                      <article className="modal-card modal-card--muted">
+                        <h3>No open partners</h3>
+                        <p>Everyone is already housed, distrustful, or holding assets.</p>
+                      </article>
+                    )}
+                  </div>
+                ) : null}
+
+                {overlay === 'assets' ? (
+                  <div className="modal-grid">
+                    {ownedProperties.length > 0 ? (
+                      ownedProperties.map((tile) => (
+                        <article className="modal-card" key={tile.id}>
+                          <p>{tile.district}</p>
+                          <h3>{tile.name}</h3>
+                          <span>
+                            Rent {formatMoney(tile.currentRent)} · Passive{' '}
+                            {formatMoney(getPropertyPassiveIncomeValue(game, tile.id))}/tick
+                          </span>
+                          <span>
+                            Upgrade {tile.upgradeLevel}/2 · Policy {tile.strategy}
+                          </span>
+                          <div className="modal-card__actions">
+                            <button
+                              className="secondary"
+                              disabled={tile.upgradeLevel >= 2}
+                              onClick={() =>
+                                dispatch({ type: 'upgrade-property', tileId: tile.id })
+                              }
+                              type="button"
+                            >
+                              Upgrade for {formatMoney(getPropertyUpgradeCost(game, tile.id))}
+                            </button>
+                            <button
+                              className="secondary"
+                              onClick={() =>
+                                dispatch({
+                                  type: 'property-strategy',
+                                  tileId: tile.id,
+                                  strategy:
+                                    tile.strategy === 'extract' ? 'stabilize' : 'extract',
+                                })
+                              }
+                              type="button"
+                            >
+                              Switch to {tile.strategy === 'extract' ? 'stabilize' : 'extract'}
+                            </button>
+                          </div>
+                        </article>
+                      ))
+                    ) : (
+                      <article className="modal-card modal-card--muted">
+                        <h3>No properties owned</h3>
+                        <p>Buyouts unlock this layer.</p>
+                      </article>
+                    )}
+                  </div>
+                ) : null}
+
+                {overlay === 'standings' ? (
+                  <div className="modal-grid">
+                    {sortedPlayers.map((player, index) => (
+                      <article className="modal-card" key={player.id}>
+                        <p>#{index + 1}</p>
+                        <h3>{player.name}</h3>
+                        <span>
+                          {getRoleText(player)} · {JOBS[player.jobId].name}
+                        </span>
+                        <span>
+                          Cash {formatMoney(player.cash)} · Debt {formatMoney(player.debt)}
+                        </span>
+                        <strong>{player.score}</strong>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
+
+                {overlay === 'feed' ? (
+                  <div className="feed-list">
+                    {game.logs.map((entry) => (
+                      <article className={`log-entry log-entry--${entry.tone}`} key={entry.id}>
+                        <span>R{entry.round}</span>
+                        <p>{entry.message}</p>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
+
+                {overlay === 'summary' ? (
+                  <div className="modal-grid">
+                    {game.roundSummaries.length > 0 ? (
+                      game.roundSummaries.map((summary) => (
+                        <article className="modal-card" key={summary.id}>
+                          <p>Round {summary.round}</p>
+                          <h3>{summary.headline ?? 'No headline'}</h3>
+                          <span>
+                            {summary.players[0]?.name} leads at {summary.players[0]?.score}
+                          </span>
+                          <div className="modal-card__notes">
+                            {summary.notes.map((note) => (
+                              <p key={note}>{note}</p>
+                            ))}
+                          </div>
+                        </article>
+                      ))
+                    ) : (
+                      <article className="modal-card modal-card--muted">
+                        <h3>No round summaries yet</h3>
+                        <p>They appear after each completed round.</p>
+                      </article>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
 
           {winner ? (
             <div className="overlay">
@@ -945,46 +847,22 @@ function App() {
                 <p className="eyebrow">Match complete</p>
                 <h2>{winner.isHuman ? 'You escaped on top.' : `${winner.name} won.`}</h2>
                 <p>
-                  Seed <strong>{game.config.seed}</strong>. Final score {winner.score}. The
-                  match now stores recent round summaries for replay and balancing work.
+                  Final seed <code>{game.config.seed}</code>. Score {winner.score}.
                 </p>
-                <div className="overlay__ranking">
+                <div className="finish-list">
                   {sortedPlayers.map((player, index) => (
-                    <div className="overlay__row" key={player.id}>
+                    <div className="finish-row" key={player.id}>
                       <span>#{index + 1}</span>
                       <strong>{player.name}</strong>
                       <span>{player.score}</span>
                     </div>
                   ))}
                 </div>
-                <div className="overlay__summary-list">
-                  {game.roundSummaries.slice(0, 3).map((summary) => (
-                    <article className="summary-card" key={summary.id}>
-                      <div className="summary-card__top">
-                        <strong>Round {summary.round}</strong>
-                        <span>{summary.headline ?? 'No headline'}</span>
-                      </div>
-                      <div className="summary-card__notes">
-                        {summary.notes.map((note) => (
-                          <p key={note}>{note}</p>
-                        ))}
-                      </div>
-                    </article>
-                  ))}
-                </div>
                 <div className="overlay__actions">
-                  <button
-                    className="primary"
-                    onClick={() => startMatch(draft)}
-                    type="button"
-                  >
+                  <button className="primary" onClick={() => startMatch(draft)} type="button">
                     Run it again
                   </button>
-                  <button
-                    className="secondary"
-                    onClick={clearToLobby}
-                    type="button"
-                  >
+                  <button className="secondary" onClick={clearToLobby} type="button">
                     Back to lobby
                   </button>
                 </div>
@@ -998,22 +876,21 @@ function App() {
             <p className="eyebrow">Static React build</p>
             <h1>GEN Z MONOPOLY</h1>
             <p className="setup__lede">
-              A real-time economic survival prototype with seeded runs, debt,
-              inflation, trust-driven social actions, and ownership decisions that
-              continue after purchase.
+              A board-first prototype with a fixed city grid, routed movement, and modal
+              overlays for the systems around the board.
             </p>
             <div className="setup__stats">
               <article>
-                <strong>3s</strong>
-                <span>In-game tick</span>
+                <strong>Grid</strong>
+                <span>Static city overview</span>
+              </article>
+              <article>
+                <strong>Route</strong>
+                <span>Up/down/left/right movement</span>
               </article>
               <article>
                 <strong>Seeded</strong>
                 <span>Deterministic runs</span>
-              </article>
-              <article>
-                <strong>Stored</strong>
-                <span>Draft + last match</span>
               </article>
             </div>
           </section>
@@ -1041,9 +918,7 @@ function App() {
                 <div className="job-grid">
                   {Object.values(JOBS).map((job) => (
                     <button
-                      className={`job-card ${
-                        draft.jobId === job.id ? 'job-card--active' : ''
-                      }`}
+                      className={`job-card ${draft.jobId === job.id ? 'job-card--active' : ''}`}
                       key={job.id}
                       onClick={() =>
                         setDraft((current) => ({
@@ -1056,7 +931,7 @@ function App() {
                       <strong>{job.name}</strong>
                       <p>{job.tagline}</p>
                       <span>
-                        Salary {formatMoney(job.salary)} · Move CD {job.moveCooldown}
+                        Salary {formatMoney(job.salary)} · Route CD {job.moveCooldown}
                       </span>
                     </button>
                   ))}
@@ -1130,18 +1005,10 @@ function App() {
               </div>
 
               <div className="setup__actions">
-                <button
-                  className="primary primary--large"
-                  onClick={() => startMatch(draft)}
-                  type="button"
-                >
+                <button className="primary primary--large" onClick={() => startMatch(draft)} type="button">
                   Start match
                 </button>
-                <button
-                  className="secondary"
-                  onClick={() => setShowTutorial(true)}
-                  type="button"
-                >
+                <button className="secondary" onClick={() => setShowTutorial(true)} type="button">
                   Open guide
                 </button>
               </div>
@@ -1149,29 +1016,20 @@ function App() {
 
             <div className="feature-stack">
               <article className="feature-card">
-                <p className="eyebrow">Core loop</p>
-                <h2>Survive the next bill without ruining the round after it.</h2>
+                <p className="eyebrow">Board-first</p>
+                <h2>The city stays still while the systems move around it.</h2>
                 <p>
-                  The economy now runs on seeded randomness, so a bad run can be
-                  replayed, tuned, and tested instead of hand-waved as luck.
+                  The board is now the visual anchor. Market, social, assets, and logs sit in
+                  overlays instead of crowding the main frame.
                 </p>
               </article>
 
               <article className="feature-card">
-                <p className="eyebrow">Social layer</p>
-                <h2>Trust is now a resource you can invest in.</h2>
+                <p className="eyebrow">Movement</p>
+                <h2>Route block by block.</h2>
                 <p>
-                  Support transfers raise trust, roommate pacts reduce burn, and
-                  informal loans still carry social risk if you flake on repayment.
-                </p>
-              </article>
-
-              <article className="feature-card">
-                <p className="eyebrow">Ownership loop</p>
-                <h2>Buying an asset is the start of a decision tree.</h2>
-                <p>
-                  Upgrades and strategy toggles let you play for extraction or
-                  stabilization instead of treating ownership as a pure score bump.
+                  Open a route, get a movement budget, and steer north, south, east, or west
+                  across the city grid before settling on a destination.
                 </p>
               </article>
 
@@ -1179,20 +1037,11 @@ function App() {
                 <article className="feature-card feature-card--last-match">
                   <p className="eyebrow">Last match</p>
                   <h2>
-                    {lastMatch.winnerName} won on seed <code>{lastMatch.seed}</code>
+                    {lastMatch.winnerName} won on <code>{lastMatch.seed}</code>
                   </h2>
                   <p>
-                    Score {lastMatch.winnerScore}. {lastMatch.totalRounds} rounds
-                    recorded.
+                    Score {lastMatch.winnerScore}. {lastMatch.totalRounds} rounds recorded.
                   </p>
-                  <div className="last-match__list">
-                    {lastMatch.summaries.slice(0, 3).map((summary) => (
-                      <div className="last-match__item" key={summary.id}>
-                        <strong>Round {summary.round}</strong>
-                        <span>{summary.headline ?? 'No headline'}</span>
-                      </div>
-                    ))}
-                  </div>
                 </article>
               ) : null}
             </div>
@@ -1204,31 +1053,27 @@ function App() {
         <div className="overlay">
           <div className="overlay__card overlay__card--guide">
             <p className="eyebrow">Guide</p>
-            <h2>How to read the pressure loop</h2>
+            <h2>Read the city like a board game</h2>
             <div className="guide-grid">
               <article className="guide-card">
-                <strong>1. Ticks hurt first</strong>
-                <p>Every tick applies living costs and passive income before the next round resets salaries.</p>
+                <strong>1. Open a route</strong>
+                <p>Press `Open route`, roll a movement budget, and steer through adjacent blocks.</p>
               </article>
               <article className="guide-card">
-                <strong>2. Rounds reshape the economy</strong>
-                <p>Debt compounds, rent grows, events trigger, and the board usually gets meaner.</p>
+                <strong>2. Settle where it helps</strong>
+                <p>You can stop early if the current tile is better than spending the full route.</p>
               </article>
               <article className="guide-card">
-                <strong>3. Trust is convertible</strong>
-                <p>Support actions improve trust, which makes roommate and informal-loan outcomes better later.</p>
+                <strong>3. Keep overlays secondary</strong>
+                <p>The board is the stable overview. Market, social, and assets live in overlays.</p>
               </article>
               <article className="guide-card">
-                <strong>4. Ownership needs management</strong>
-                <p>Upgrades increase value, and property strategy changes whether you optimize for extraction or stability.</p>
+                <strong>4. Buildings tell the story</strong>
+                <p>Higher-demand districts and upgraded properties read taller in the skyline.</p>
               </article>
             </div>
             <div className="overlay__actions">
-              <button
-                className="primary"
-                onClick={() => setShowTutorial(false)}
-                type="button"
-              >
+              <button className="primary" onClick={() => setShowTutorial(false)} type="button">
                 Close guide
               </button>
             </div>

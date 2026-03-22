@@ -37,6 +37,9 @@ export interface TileDefinition {
   growth: number
   marketPrice: number
   flavor: string
+  gridX: number
+  gridY: number
+  skyline: number
 }
 
 export interface TileState extends TileDefinition {
@@ -65,6 +68,14 @@ export interface MarketListing {
   price: number
   expiresRound: number
   tag: string
+}
+
+export interface PendingMove {
+  playerId: string
+  rolledSteps: number
+  stepsRemaining: number
+  cursorPosition: number
+  route: number[]
 }
 
 export interface PeerLoan {
@@ -155,6 +166,7 @@ export interface GameState {
   gameSecondsElapsed: number
   tiles: TileState[]
   players: PlayerState[]
+  pendingMove: PendingMove | null
   marketListings: MarketListing[]
   activeEffects: ActiveEffect[]
   currentHeadline: string | null

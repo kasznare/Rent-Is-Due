@@ -10,6 +10,8 @@ export const GAME_SECONDS_PER_TICK = 3
 export const TICKS_PER_ROUND = 20
 export const BASE_TICK_MS = 1000
 export const MAX_LOGS = 48
+export const BOARD_WIDTH = 4
+export const BOARD_HEIGHT = 4
 
 export const JOBS: Record<JobId, JobProfile> = {
   corporate: {
@@ -65,6 +67,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0,
     marketPrice: 0,
     flavor: 'Wrap the board and skim a little oxygen.',
+    gridX: 0,
+    gridY: 0,
+    skyline: 2,
   },
   {
     id: 1,
@@ -76,6 +81,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0.04,
     marketPrice: 210,
     flavor: 'Cheap enough to enter, expensive enough to sting.',
+    gridX: 1,
+    gridY: 0,
+    skyline: 2,
   },
   {
     id: 2,
@@ -87,6 +95,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0.05,
     marketPrice: 275,
     flavor: 'The fridge is full of labels and resentment.',
+    gridX: 2,
+    gridY: 0,
+    skyline: 3,
   },
   {
     id: 3,
@@ -98,6 +109,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0,
     marketPrice: 0,
     flavor: 'A scroll can wreck you or save you.',
+    gridX: 3,
+    gridY: 0,
+    skyline: 4,
   },
   {
     id: 4,
@@ -109,6 +123,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0.08,
     marketPrice: 420,
     flavor: 'A nice brick wall for half your paycheck.',
+    gridX: 0,
+    gridY: 1,
+    skyline: 5,
   },
   {
     id: 5,
@@ -120,6 +137,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0.06,
     marketPrice: 305,
     flavor: 'You pay rent and interest in the same breath.',
+    gridX: 1,
+    gridY: 1,
+    skyline: 4,
   },
   {
     id: 6,
@@ -131,6 +151,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0.1,
     marketPrice: 470,
     flavor: 'Fits one person and zero hope.',
+    gridX: 2,
+    gridY: 1,
+    skyline: 6,
   },
   {
     id: 7,
@@ -142,6 +165,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0,
     marketPrice: 0,
     flavor: 'Trust still exists, barely.',
+    gridX: 3,
+    gridY: 1,
+    skyline: 3,
   },
   {
     id: 8,
@@ -153,6 +179,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0.04,
     marketPrice: 235,
     flavor: 'The lease is a rumor and the rent is real.',
+    gridX: 0,
+    gridY: 2,
+    skyline: 2,
   },
   {
     id: 9,
@@ -164,6 +193,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0.07,
     marketPrice: 345,
     flavor: 'If the system likes you, the month gets easier.',
+    gridX: 1,
+    gridY: 2,
+    skyline: 4,
   },
   {
     id: 10,
@@ -175,6 +207,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0.08,
     marketPrice: 362,
     flavor: 'Every shortcut still costs time.',
+    gridX: 2,
+    gridY: 2,
+    skyline: 5,
   },
   {
     id: 11,
@@ -186,6 +221,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0.11,
     marketPrice: 520,
     flavor: 'The rent assumes your startup already exited.',
+    gridX: 3,
+    gridY: 2,
+    skyline: 6,
   },
   {
     id: 12,
@@ -197,6 +235,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0,
     marketPrice: 0,
     flavor: 'Forms, queues, and a small chance of mercy.',
+    gridX: 0,
+    gridY: 3,
+    skyline: 3,
   },
   {
     id: 13,
@@ -208,6 +249,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0.05,
     marketPrice: 248,
     flavor: 'Good light, bad insulation, worse plumbing.',
+    gridX: 1,
+    gridY: 3,
+    skyline: 3,
   },
   {
     id: 14,
@@ -219,6 +263,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0.06,
     marketPrice: 318,
     flavor: 'Looks efficient until the Wi-Fi dies.',
+    gridX: 2,
+    gridY: 3,
+    skyline: 4,
   },
   {
     id: 15,
@@ -230,6 +277,9 @@ export const TILE_DEFINITIONS: TileDefinition[] = [
     growth: 0,
     marketPrice: 0,
     flavor: 'The market sells only when it smells desperation.',
+    gridX: 3,
+    gridY: 3,
+    skyline: 5,
   },
 ]
 

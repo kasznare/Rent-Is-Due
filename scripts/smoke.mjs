@@ -22,29 +22,46 @@ try {
   }
   await page.getByRole('button', { name: 'Start match' }).click()
 
-  await page
-    .getByRole('heading', { name: 'Rent is due. The clock never stops.' })
-    .waitFor()
+  await page.getByRole('button', { name: 'Pause' }).waitFor()
 
-  const elapsedLocator = page
-    .locator('.pillbox')
-    .filter({ hasText: 'Elapsed' })
+  const blockCount = await page.locator('.block').count()
+  assert.equal(blockCount, 16, 'board should render a 4x4 city grid')
+
+  const roundClock = page
+    .locator('.hud-card')
+    .filter({ hasText: 'Next round' })
     .locator('strong')
 
-  const before = await elapsedLocator.textContent()
+  const before = await roundClock.textContent()
   await page.waitForTimeout(1300)
-  const after = await elapsedLocator.textContent()
+  const after = await roundClock.textContent()
 
-  assert.notEqual(after, before, 'elapsed timer should advance while running')
+  assert.notEqual(after, before, 'round clock should advance while running')
+
+  await page.getByRole('button', { name: 'Open route' }).click()
+  await page.getByText(/blocks left/i).waitFor()
+
+  const east = page.getByRole('button', { name: 'East' })
+  const south = page.getByRole('button', { name: 'South' })
+  if (await east.isEnabled().catch(() => false)) {
+    await east.click()
+  } else {
+    await south.click()
+  }
+
+  await page.getByRole('button', { name: 'Settle here' }).click()
+  await page.getByRole('button', { name: 'Market' }).click()
+  await page.getByRole('heading', { name: 'Market' }).waitFor()
+  await page.getByRole('button', { name: 'Close' }).click()
 
   await page.getByRole('button', { name: 'Pause' }).click()
   await page.getByRole('button', { name: 'Resume' }).waitFor()
 
-  const pausedAt = await elapsedLocator.textContent()
+  const pausedAt = await roundClock.textContent()
   await page.waitForTimeout(1300)
-  const pausedAfter = await elapsedLocator.textContent()
+  const pausedAfter = await roundClock.textContent()
 
-  assert.equal(pausedAfter, pausedAt, 'elapsed timer should stop while paused')
+  assert.equal(pausedAfter, pausedAt, 'round clock should stop while paused')
 
   console.log('Smoke test passed')
 } finally {
