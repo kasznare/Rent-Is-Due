@@ -1,8 +1,7 @@
-import { useEffect, useReducer, useState } from 'react'
+import { startTransition, useEffect, useReducer, useState } from 'react'
 import './App.css'
 import {
   BASE_TICK_MS,
-  DEFAULT_CONFIG,
   GAME_SECONDS_PER_TICK,
   JOBS,
   TICKS_PER_ROUND,
@@ -10,10 +9,14 @@ import {
 import {
   advanceTick,
   createInitialGame,
+  createLastMatchSnapshot,
   formatMoney,
   formatTime,
   getHumanPlayer,
+  getOwnedProperties,
   getPassiveIncomeValue,
+  getPropertyPassiveIncomeValue,
+  getPropertyUpgradeCost,
   getRoundInterestRate,
   getUpcomingLivingCost,
   performBridgeLoanRequest,
@@ -22,9 +25,30 @@ import {
   performGig,
   performLoan,
   performMove,
+  performPropertyStrategy,
+  performPropertyUpgrade,
   performRoommateRequest,
+  performSupportTransfer,
 } from './game/engine'
-import type { GameConfig, GameState, JobId, LoanSize, PlayerState } from './game/types'
+import type {
+  GameConfig,
+  GameState,
+  JobId,
+  LastMatchSnapshot,
+  LoanSize,
+  PlayerState,
+  PropertyStrategy,
+} from './game/types'
+import {
+  loadDraft,
+  loadLastMatch,
+  loadSavedGame,
+  loadTutorialDismissed,
+  saveDraft,
+  saveGame,
+  saveLastMatch,
+  saveTutorialDismissed,
+} from './storage'
 
 type Action =
   | { type: 'clear' }
@@ -35,8 +59,11 @@ type Action =
   | { type: 'loan'; size: LoanSize }
   | { type: 'buyout'; tileId: number }
   | { type: 'roommate'; partnerId: string }
+  | { type: 'support'; partnerId: string }
   | { type: 'bridge-loan' }
   | { type: 'repay-bridge' }
+  | { type: 'upgrade-property'; tileId: number }
+  | { type: 'property-strategy'; tileId: number; strategy: PropertyStrategy }
 
 const SPEED_OPTIONS = [1, 2, 4]
 
@@ -77,12 +104,24 @@ const gameReducer = (state: GameState | null, action: Action) => {
     return performRoommateRequest(state, action.partnerId)
   }
 
+  if (action.type === 'support') {
+    return performSupportTransfer(state, action.partnerId)
+  }
+
   if (action.type === 'bridge-loan') {
     return performBridgeLoanRequest(state)
   }
 
   if (action.type === 'repay-bridge') {
     return performBridgeRepayment(state)
+  }
+
+  if (action.type === 'upgrade-property') {
+    return performPropertyUpgrade(state, action.tileId)
+  }
+
+  if (action.type === 'property-strategy') {
+    return performPropertyStrategy(state, action.tileId, action.strategy)
   }
 
   return state
@@ -93,7 +132,7 @@ const getRiskState = (player: PlayerState, nextBill: number) => {
     return 'critical'
   }
 
-  if (player.cash <= nextBill * 2 || player.debt > player.cash * 3) {
+  if (player.cash <= nextBill * 3 || player.debt > player.cash * 2.2) {
     return 'tight'
   }
 
@@ -124,12 +163,84 @@ const getRoleText = (player: PlayerState) => {
   return player.archetype.replace('-', ' ')
 }
 
+const getMoveHint = (player: PlayerState) => {
+  if (player.workLock > 0) {
+    return `Working for ${player.workLock} ticks`
+  }
+
+  if (player.skipActions > 0) {
+    return `Burnout lock for ${player.skipActions} ticks`
+  }
+
+  if (player.moveCooldown > 0) {
+    return `Move ready in ${player.moveCooldown} ticks`
+  }
+
+  return 'Ready now'
+}
+
+const getGigHint = (player: PlayerState) => {
+  if (player.workLock > 0) {
+    return `Job lock for ${player.workLock} ticks`
+  }
+
+  if (player.skipActions > 0) {
+    return `Burnout lock for ${player.skipActions} ticks`
+  }
+
+  if (player.gigCooldown > 0) {
+    return `Gig ready in ${player.gigCooldown} ticks`
+  }
+
+  return 'Ready now'
+}
+
+const getLargeLoanHint = (player: PlayerState) => {
+  if (player.survivalRounds > 0) {
+    return 'Blocked in Survival Mode'
+  }
+
+  if (player.creditScore <= 600) {
+    return 'Needs 600+ credit'
+  }
+
+  if (player.debt >= 540) {
+    return 'Debt ceiling reached'
+  }
+
+  return 'Available'
+}
+
+const getSupportHint = (player: PlayerState) => {
+  if (player.cash < 24) {
+    return 'Need $24 cash to build trust'
+  }
+
+  return 'Use cash to improve future deals'
+}
+
+const createRandomSeed = () => `seed-${Date.now().toString(36)}`
+
 function App() {
-  const [draft, setDraft] = useState<GameConfig>(DEFAULT_CONFIG)
-  const [game, dispatch] = useReducer(gameReducer, null)
+  const [draft, setDraft] = useState<GameConfig>(() => loadDraft())
+  const [game, dispatch] = useReducer(gameReducer, null, () => loadSavedGame())
   const [speed, setSpeed] = useState(2)
   const [paused, setPaused] = useState(false)
+  const [lastMatch, setLastMatch] = useState<LastMatchSnapshot | null>(() => loadLastMatch())
+  const [showTutorial, setShowTutorial] = useState(() => !loadTutorialDismissed())
   const clockPaused = paused || game?.phase === 'finished'
+
+  useEffect(() => {
+    saveDraft(draft)
+  }, [draft])
+
+  useEffect(() => {
+    saveGame(game)
+  }, [game])
+
+  useEffect(() => {
+    saveTutorialDismissed(!showTutorial)
+  }, [showTutorial])
 
   useEffect(() => {
     if (!game || game.phase !== 'running' || clockPaused) {
@@ -142,6 +253,32 @@ function App() {
 
     return () => window.clearTimeout(timeout)
   }, [clockPaused, game, speed])
+
+  const persistFinishedGame = (current: GameState | null) => {
+    if (!current || current.phase !== 'finished') {
+      return
+    }
+
+    const snapshot = createLastMatchSnapshot(current)
+    if (!snapshot) {
+      return
+    }
+
+    saveLastMatch(snapshot)
+    setLastMatch(snapshot)
+  }
+
+  const clearToLobby = () => {
+    persistFinishedGame(game)
+    setPaused(false)
+    startTransition(() => dispatch({ type: 'clear' }))
+  }
+
+  const startMatch = (config: GameConfig) => {
+    persistFinishedGame(game)
+    setPaused(false)
+    startTransition(() => dispatch({ type: 'start', config }))
+  }
 
   const human = game ? getHumanPlayer(game) : null
   const sortedPlayers = game
@@ -168,10 +305,16 @@ function App() {
           player.ownedTileIds.length === 0,
       )
     : []
+  const ownedProperties = game && human ? getOwnedProperties(game, human.id) : []
   const winner =
     game?.phase === 'finished'
       ? sortedPlayers[0] ?? null
       : null
+  const canLargeLoan = human
+    ? human.creditScore > 600 &&
+      human.debt < 540 &&
+      human.survivalRounds === 0
+    : false
 
   return (
     <div className="app-shell">
@@ -182,8 +325,9 @@ function App() {
               <p className="eyebrow">Gen Z Monopoly</p>
               <h1>Rent is due. The clock never stops.</h1>
               <p className="lede">
-                Client-only prototype for static hosting. The economy runs on a
-                compressed clock so a full match lands in a few minutes.
+                Seeded simulation build. Runs are now reproducible, round summaries
+                persist, and the housing loop is tuned to be harsh without instantly
+                collapsing every player.
               </p>
             </div>
 
@@ -197,6 +341,10 @@ function App() {
               <div className="pillbox">
                 <span>Next round</span>
                 <strong>{nextRoundLabel}</strong>
+              </div>
+              <div className="pillbox">
+                <span>Seed</span>
+                <strong>{game.config.seed}</strong>
               </div>
               <div className="pillbox">
                 <span>Elapsed</span>
@@ -228,10 +376,14 @@ function App() {
               </button>
               <button
                 className="secondary"
-                onClick={() => {
-                  setPaused(false)
-                  dispatch({ type: 'clear' })
-                }}
+                onClick={() => setShowTutorial(true)}
+                type="button"
+              >
+                Guide
+              </button>
+              <button
+                className="secondary"
+                onClick={clearToLobby}
                 type="button"
               >
                 Back to lobby
@@ -294,7 +446,11 @@ function App() {
                         {tile.type === 'property' ? (
                           <>
                             <strong>{formatMoney(tile.currentRent)}</strong>
-                            <span>{owner ? `Owned by ${owner.name}` : 'Market-owned'}</span>
+                            <span>
+                              {owner
+                                ? `${owner.name} · ${tile.strategy} · U${tile.upgradeLevel}`
+                                : 'Market-owned'}
+                            </span>
                           </>
                         ) : tile.type === 'market' ? (
                           <>
@@ -336,10 +492,10 @@ function App() {
                       <h2>{human.name}</h2>
                       <p className="risk-copy">
                         {riskState === 'critical'
-                          ? 'One bad tick from collapse.'
+                          ? 'You are operating inside hard constraints. Stabilize first.'
                           : riskState === 'tight'
-                            ? 'Manage the next round carefully.'
-                            : 'You have room to choose rather than react.'}
+                            ? 'You have options, but each one mortgages a future turn.'
+                            : 'You still have room to play for leverage instead of pure survival.'}
                       </p>
                     </div>
                     <div className="status-badge">{getStatusText(human)}</div>
@@ -388,6 +544,33 @@ function App() {
                     </div>
                   ) : null}
 
+                  <section className="subpanel">
+                    <div className="subpanel__header">
+                      <div>
+                        <p className="eyebrow">Action windows</p>
+                        <h3>What is open right now</h3>
+                      </div>
+                    </div>
+                    <div className="hint-grid">
+                      <article className="hint-card">
+                        <strong>Move</strong>
+                        <p>{getMoveHint(human)}</p>
+                      </article>
+                      <article className="hint-card">
+                        <strong>Gig</strong>
+                        <p>{getGigHint(human)}</p>
+                      </article>
+                      <article className="hint-card">
+                        <strong>Large loan</strong>
+                        <p>{getLargeLoanHint(human)}</p>
+                      </article>
+                      <article className="hint-card">
+                        <strong>Trust</strong>
+                        <p>{getSupportHint(human)}</p>
+                      </article>
+                    </div>
+                  </section>
+
                   <div className="actions-grid">
                     <button
                       className="primary"
@@ -396,11 +579,7 @@ function App() {
                       type="button"
                     >
                       Move
-                      <span>
-                        {human.moveCooldown > 0
-                          ? `${human.moveCooldown} ticks`
-                          : 'Roll automatically'}
-                      </span>
+                      <span>{getMoveHint(human)}</span>
                     </button>
 
                     <button
@@ -410,11 +589,7 @@ function App() {
                       type="button"
                     >
                       Work a gig
-                      <span>
-                        {human.gigCooldown > 0
-                          ? `${human.gigCooldown} ticks`
-                          : 'Fast cash, high stress'}
-                      </span>
+                      <span>{getGigHint(human)}</span>
                     </button>
 
                     <button
@@ -423,16 +598,17 @@ function App() {
                       type="button"
                     >
                       Small loan
-                      <span>Quick approval, ugly interest</span>
+                      <span>Fast approval, higher drag later</span>
                     </button>
 
                     <button
                       className="secondary"
+                      disabled={!canLargeLoan}
                       onClick={() => dispatch({ type: 'loan', size: 'large' })}
                       type="button"
                     >
                       Large loan
-                      <span>Better liquidity, stricter gate</span>
+                      <span>{getLargeLoanHint(human)}</span>
                     </button>
 
                     <button
@@ -442,7 +618,7 @@ function App() {
                       type="button"
                     >
                       Ask table for help
-                      <span>Trust-based player loan</span>
+                      <span>Generic bridge loan from the best-trusting rival</span>
                     </button>
 
                     <button
@@ -517,8 +693,93 @@ function App() {
                   <section className="subpanel">
                     <div className="subpanel__header">
                       <div>
+                        <p className="eyebrow">Ownership</p>
+                        <h3>Manage your holdings</h3>
+                      </div>
+                      <span>{ownedProperties.length} owned</span>
+                    </div>
+                    <div className="property-grid">
+                      {ownedProperties.length > 0 ? (
+                        ownedProperties.map((tile) => {
+                          const upgradeCost = getPropertyUpgradeCost(game, tile.id)
+                          const passivePerTile = getPropertyPassiveIncomeValue(game, tile.id)
+
+                          return (
+                            <article className="property-card" key={tile.id}>
+                              <div>
+                                <p>{tile.district}</p>
+                                <h4>{tile.name}</h4>
+                                <span>
+                                  Rent {formatMoney(tile.currentRent)} · Passive{' '}
+                                  {formatMoney(passivePerTile)} / tick
+                                </span>
+                              </div>
+                              <div className="property-card__stats">
+                                <span>Upgrade {tile.upgradeLevel} / 2</span>
+                                <span>Policy {tile.strategy}</span>
+                              </div>
+                              <div className="property-card__actions">
+                                <button
+                                  className="secondary"
+                                  disabled={tile.upgradeLevel >= 2}
+                                  onClick={() =>
+                                    dispatch({
+                                      type: 'upgrade-property',
+                                      tileId: tile.id,
+                                    })
+                                  }
+                                  type="button"
+                                >
+                                  Upgrade
+                                  <span>
+                                    {tile.upgradeLevel >= 2
+                                      ? 'Maxed'
+                                      : formatMoney(upgradeCost)}
+                                  </span>
+                                </button>
+                                <button
+                                  className="secondary"
+                                  onClick={() =>
+                                    dispatch({
+                                      type: 'property-strategy',
+                                      tileId: tile.id,
+                                      strategy:
+                                        tile.strategy === 'extract'
+                                          ? 'stabilize'
+                                          : 'extract',
+                                    })
+                                  }
+                                  type="button"
+                                >
+                                  {tile.strategy === 'extract'
+                                    ? 'Switch to stabilize'
+                                    : 'Switch to extract'}
+                                  <span>
+                                    {tile.strategy === 'extract'
+                                      ? 'Lower growth, steadier trust'
+                                      : 'Higher growth, harder pressure'}
+                                  </span>
+                                </button>
+                              </div>
+                            </article>
+                          )
+                        })
+                      ) : (
+                        <article className="property-card property-card--muted">
+                          <div>
+                            <h4>No owned properties</h4>
+                            <p>Buyouts unlock upgrades and policy choices.</p>
+                          </div>
+                        </article>
+                      )}
+                    </div>
+                  </section>
+
+                  <section className="subpanel">
+                    <div className="subpanel__header">
+                      <div>
                         <p className="eyebrow">Social</p>
-                        <h3>Roommate pacts</h3>
+                        <h3>Trust, support, and roommates</h3>
                       </div>
                       <span>
                         {human.roommateWith
@@ -540,15 +801,27 @@ function App() {
                               <span>Cash {formatMoney(player.cash)}</span>
                               <span>Trust {player.trustInHuman}</span>
                             </div>
-                            <button
-                              className="secondary"
-                              onClick={() =>
-                                dispatch({ type: 'roommate', partnerId: player.id })
-                              }
-                              type="button"
-                            >
-                              Pitch roommate deal
-                            </button>
+                            <div className="roommate-card__actions">
+                              <button
+                                className="secondary"
+                                onClick={() =>
+                                  dispatch({ type: 'roommate', partnerId: player.id })
+                                }
+                                type="button"
+                              >
+                                Pitch roommate deal
+                              </button>
+                              <button
+                                className="secondary"
+                                disabled={human.cash < 24}
+                                onClick={() =>
+                                  dispatch({ type: 'support', partnerId: player.id })
+                                }
+                                type="button"
+                              >
+                                Send support
+                              </button>
+                            </div>
                           </article>
                         ))
                       ) : (
@@ -608,6 +881,44 @@ function App() {
                 </div>
               </section>
 
+              <section className="panel panel--summary">
+                <div className="panel__header">
+                  <div>
+                    <p className="eyebrow">Round recap</p>
+                    <h2>Recent rounds</h2>
+                  </div>
+                  <span>{game.roundSummaries.length} stored</span>
+                </div>
+                <div className="summary-stream">
+                  {game.roundSummaries.length > 0 ? (
+                    game.roundSummaries.map((summary) => (
+                      <article className="summary-card" key={summary.id}>
+                        <div className="summary-card__top">
+                          <strong>Round {summary.round}</strong>
+                          <span>{summary.headline ?? 'No headline'}</span>
+                        </div>
+                        <div className="summary-card__leaders">
+                          {summary.players.slice(0, 2).map((player) => (
+                            <p key={player.id}>
+                              {player.name}: {player.score}
+                            </p>
+                          ))}
+                        </div>
+                        <div className="summary-card__notes">
+                          {summary.notes.map((note) => (
+                            <p key={note}>{note}</p>
+                          ))}
+                        </div>
+                      </article>
+                    ))
+                  ) : (
+                    <article className="summary-card summary-card--muted">
+                      <p>Round summaries appear after each completed round.</p>
+                    </article>
+                  )}
+                </div>
+              </section>
+
               <section className="panel panel--log">
                 <div className="panel__header">
                   <div>
@@ -634,8 +945,8 @@ function App() {
                 <p className="eyebrow">Match complete</p>
                 <h2>{winner.isHuman ? 'You escaped on top.' : `${winner.name} won.`}</h2>
                 <p>
-                  Final score {winner.score}. Net worth, debt ratio, stability, and
-                  assets all fed the result.
+                  Seed <strong>{game.config.seed}</strong>. Final score {winner.score}. The
+                  match now stores recent round summaries for replay and balancing work.
                 </p>
                 <div className="overlay__ranking">
                   {sortedPlayers.map((player, index) => (
@@ -646,23 +957,32 @@ function App() {
                     </div>
                   ))}
                 </div>
+                <div className="overlay__summary-list">
+                  {game.roundSummaries.slice(0, 3).map((summary) => (
+                    <article className="summary-card" key={summary.id}>
+                      <div className="summary-card__top">
+                        <strong>Round {summary.round}</strong>
+                        <span>{summary.headline ?? 'No headline'}</span>
+                      </div>
+                      <div className="summary-card__notes">
+                        {summary.notes.map((note) => (
+                          <p key={note}>{note}</p>
+                        ))}
+                      </div>
+                    </article>
+                  ))}
+                </div>
                 <div className="overlay__actions">
                   <button
                     className="primary"
-                    onClick={() => {
-                      setPaused(false)
-                      dispatch({ type: 'start', config: draft })
-                    }}
+                    onClick={() => startMatch(draft)}
                     type="button"
                   >
                     Run it again
                   </button>
                   <button
                     className="secondary"
-                    onClick={() => {
-                      setPaused(false)
-                      dispatch({ type: 'clear' })
-                    }}
+                    onClick={clearToLobby}
                     type="button"
                   >
                     Back to lobby
@@ -678,9 +998,9 @@ function App() {
             <p className="eyebrow">Static React build</p>
             <h1>GEN Z MONOPOLY</h1>
             <p className="setup__lede">
-              A real-time economic survival prototype with debt, inflation,
-              gig work, roommate risk, and rare ownership windows. Built to run on
-              GitHub Pages without a backend.
+              A real-time economic survival prototype with seeded runs, debt,
+              inflation, trust-driven social actions, and ownership decisions that
+              continue after purchase.
             </p>
             <div className="setup__stats">
               <article>
@@ -688,12 +1008,12 @@ function App() {
                 <span>In-game tick</span>
               </article>
               <article>
-                <strong>20</strong>
-                <span>Ticks per round</span>
+                <strong>Seeded</strong>
+                <span>Deterministic runs</span>
               </article>
               <article>
-                <strong>2-6</strong>
-                <span>Players supported in prototype</span>
+                <strong>Stored</strong>
+                <span>Draft + last match</span>
               </article>
             </div>
           </section>
@@ -780,16 +1100,51 @@ function App() {
                 </label>
               </div>
 
-              <button
-                className="primary primary--large"
-                onClick={() => {
-                  setPaused(false)
-                  dispatch({ type: 'start', config: draft })
-                }}
-                type="button"
-              >
-                Start match
-              </button>
+              <div className="field">
+                <span>Seed</span>
+                <div className="seed-row">
+                  <input
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        seed: event.target.value,
+                      }))
+                    }
+                    placeholder="rent-is-due"
+                    type="text"
+                    value={draft.seed}
+                  />
+                  <button
+                    className="secondary"
+                    onClick={() =>
+                      setDraft((current) => ({
+                        ...current,
+                        seed: createRandomSeed(),
+                      }))
+                    }
+                    type="button"
+                  >
+                    Randomize
+                  </button>
+                </div>
+              </div>
+
+              <div className="setup__actions">
+                <button
+                  className="primary primary--large"
+                  onClick={() => startMatch(draft)}
+                  type="button"
+                >
+                  Start match
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => setShowTutorial(true)}
+                  type="button"
+                >
+                  Open guide
+                </button>
+              </div>
             </div>
 
             <div className="feature-stack">
@@ -797,35 +1152,89 @@ function App() {
                 <p className="eyebrow">Core loop</p>
                 <h2>Survive the next bill without ruining the round after it.</h2>
                 <p>
-                  Every tick applies passive income and living costs. Every round
-                  compounds debt, raises rent, and gives the economy new ways to hurt
-                  you.
+                  The economy now runs on seeded randomness, so a bad run can be
+                  replayed, tuned, and tested instead of hand-waved as luck.
                 </p>
               </article>
 
               <article className="feature-card">
-                <p className="eyebrow">Design adaptation</p>
-                <h2>Static-hosted version</h2>
+                <p className="eyebrow">Social layer</p>
+                <h2>Trust is now a resource you can invest in.</h2>
                 <p>
-                  The original concept called for a server-authoritative multiplayer
-                  economy. This build compresses that into a local simulation with AI
-                  rivals so it can ship cleanly to GitHub Pages.
+                  Support transfers raise trust, roommate pacts reduce burn, and
+                  informal loans still carry social risk if you flake on repayment.
                 </p>
               </article>
 
               <article className="feature-card">
-                <p className="eyebrow">Win state</p>
-                <h2>Timer-based scoring</h2>
+                <p className="eyebrow">Ownership loop</p>
+                <h2>Buying an asset is the start of a decision tree.</h2>
                 <p>
-                  Final ranking blends net worth, debt ratio, stability, and owned
-                  assets. You can survive with debt, but you usually cannot win with
-                  it.
+                  Upgrades and strategy toggles let you play for extraction or
+                  stabilization instead of treating ownership as a pure score bump.
                 </p>
               </article>
+
+              {lastMatch ? (
+                <article className="feature-card feature-card--last-match">
+                  <p className="eyebrow">Last match</p>
+                  <h2>
+                    {lastMatch.winnerName} won on seed <code>{lastMatch.seed}</code>
+                  </h2>
+                  <p>
+                    Score {lastMatch.winnerScore}. {lastMatch.totalRounds} rounds
+                    recorded.
+                  </p>
+                  <div className="last-match__list">
+                    {lastMatch.summaries.slice(0, 3).map((summary) => (
+                      <div className="last-match__item" key={summary.id}>
+                        <strong>Round {summary.round}</strong>
+                        <span>{summary.headline ?? 'No headline'}</span>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ) : null}
             </div>
           </section>
         </main>
       )}
+
+      {showTutorial ? (
+        <div className="overlay">
+          <div className="overlay__card overlay__card--guide">
+            <p className="eyebrow">Guide</p>
+            <h2>How to read the pressure loop</h2>
+            <div className="guide-grid">
+              <article className="guide-card">
+                <strong>1. Ticks hurt first</strong>
+                <p>Every tick applies living costs and passive income before the next round resets salaries.</p>
+              </article>
+              <article className="guide-card">
+                <strong>2. Rounds reshape the economy</strong>
+                <p>Debt compounds, rent grows, events trigger, and the board usually gets meaner.</p>
+              </article>
+              <article className="guide-card">
+                <strong>3. Trust is convertible</strong>
+                <p>Support actions improve trust, which makes roommate and informal-loan outcomes better later.</p>
+              </article>
+              <article className="guide-card">
+                <strong>4. Ownership needs management</strong>
+                <p>Upgrades increase value, and property strategy changes whether you optimize for extraction or stability.</p>
+              </article>
+            </div>
+            <div className="overlay__actions">
+              <button
+                className="primary"
+                onClick={() => setShowTutorial(false)}
+                type="button"
+              >
+                Close guide
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

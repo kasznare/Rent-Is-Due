@@ -11,29 +11,69 @@ import type {
   Archetype,
   GameConfig,
   GameState,
+  LastMatchSnapshot,
   LoanSize,
   LogEntry,
   MarketListing,
   PlayerState,
+  PropertyStrategy,
+  RoundSummary,
   Tone,
 } from './types'
 
 const HUMAN_ID = 'human'
+const MAX_ROUND_SUMMARIES = 8
+const MAX_PROPERTY_UPGRADE = 2
+const SUPPORT_TRANSFER = 24
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value))
 
-const randInt = (min: number, max: number) =>
-  Math.floor(Math.random() * (max - min + 1)) + min
-
-const chance = (value: number) => Math.random() < value
-
-const weightedPick = <T,>(items: T[]): T =>
-  items[Math.floor(Math.random() * items.length)]
-
 const money = (amount: number) => `$${Math.round(amount)}`
 
-const toneId = () => Math.random().toString(36).slice(2, 10)
+const normalizeSeed = (value: string) => value.trim().toLowerCase() || 'rent-is-due'
+
+export const createSeedFromText = (value: string) => {
+  let seed = 1779033703 ^ normalizeSeed(value).length
+
+  for (let index = 0; index < normalizeSeed(value).length; index += 1) {
+    seed = Math.imul(seed ^ normalizeSeed(value).charCodeAt(index), 3432918353)
+    seed = (seed << 13) | (seed >>> 19)
+  }
+
+  seed = Math.imul(seed ^ (seed >>> 16), 2246822507)
+  seed = Math.imul(seed ^ (seed >>> 13), 3266489909)
+  seed ^= seed >>> 16
+  return seed >>> 0
+}
+
+const nextRandom = (state: GameState) => {
+  let next = (state.rngState += 0x6d2b79f5)
+  next = Math.imul(next ^ (next >>> 15), next | 1)
+  next ^= next + Math.imul(next ^ (next >>> 7), next | 61)
+  return ((next ^ (next >>> 14)) >>> 0) / 4294967296
+}
+
+const randInt = (state: GameState, min: number, max: number) =>
+  Math.floor(nextRandom(state) * (max - min + 1)) + min
+
+const chance = (state: GameState, value: number) => nextRandom(state) < value
+
+const weightedPick = <T,>(state: GameState, items: T[]) =>
+  items[Math.floor(nextRandom(state) * items.length)]
+
+const shuffle = <T,>(state: GameState, items: T[]) => {
+  const next = [...items]
+
+  for (let index = next.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(nextRandom(state) * (index + 1))
+    ;[next[index], next[swapIndex]] = [next[swapIndex], next[index]]
+  }
+
+  return next
+}
+
+const nextId = (state: GameState, prefix: string) => `${prefix}-${state.nextId++}`
 
 const getHuman = (state: GameState) =>
   state.players.find((player) => player.id === HUMAN_ID)
@@ -43,6 +83,9 @@ const getPlayer = (state: GameState, playerId: string) =>
 
 const getTile = (state: GameState, tileId: number) =>
   state.tiles.find((tile) => tile.id === tileId)
+
+const getOwnedTiles = (state: GameState, playerId: string) =>
+  state.tiles.filter((tile) => tile.ownerId === playerId)
 
 const getEconomySnapshot = (effects: ActiveEffect[]) =>
   effects.reduce(
@@ -69,7 +112,7 @@ const getEconomySnapshot = (effects: ActiveEffect[]) =>
 
 const addLog = (state: GameState, message: string, tone: Tone = 'neutral') => {
   const entry: LogEntry = {
-    id: toneId(),
+    id: nextId(state, 'log'),
     round: state.round,
     tone,
     message,
@@ -78,7 +121,7 @@ const addLog = (state: GameState, message: string, tone: Tone = 'neutral') => {
 }
 
 const addAlert = (state: GameState, message: string) => {
-  state.alerts = [message, ...state.alerts].slice(0, 3)
+  state.alerts = [message, ...state.alerts].slice(0, 4)
 }
 
 const normalizePlayerState = (player: PlayerState) => {
@@ -91,22 +134,12 @@ const normalizePlayerState = (player: PlayerState) => {
   player.workLock = Math.max(0, Math.round(player.workLock))
   player.skipActions = Math.max(0, Math.round(player.skipActions))
   player.survivalRounds = Math.max(0, Math.round(player.survivalRounds))
+  player.trustInHuman = clamp(Math.round(player.trustInHuman), 0, 100)
 }
-
-const getPassiveIncome = (state: GameState, player: PlayerState) =>
-  player.ownedTileIds.reduce((total, tileId) => {
-    const tile = getTile(state, tileId)
-
-    if (!tile) {
-      return total
-    }
-
-    return total + Math.max(2, Math.round(tile.currentRent * 0.14))
-  }, 0)
 
 const getMoveCooldown = (player: PlayerState) => {
   const base = JOBS[player.jobId].moveCooldown
-  const stabilityPenalty = player.stability < 38 ? 1 : 0
+  const stabilityPenalty = player.stability < 36 ? 1 : 0
   const survivalPenalty = player.survivalRounds > 0 ? 1 : 0
   return base + stabilityPenalty + survivalPenalty
 }
@@ -118,22 +151,41 @@ const getLivingCost = (
   player: PlayerState,
   livingCostMultiplier: number,
 ) => {
-  let cost = 18
+  let cost = 7
 
   if (player.livingStatus === 'roommates') {
-    cost = 11
+    cost = 4
   }
 
   if (player.livingStatus === 'owner') {
-    cost = 8
+    cost = 3
   }
 
   if (player.survivalRounds > 0) {
-    cost *= 0.65
+    cost *= 0.72
   }
 
-  return Math.max(4, Math.round(cost * livingCostMultiplier))
+  return Math.max(2, Math.round(cost * livingCostMultiplier))
 }
+
+const getUpgradeCost = (tile: GameState['tiles'][number]) =>
+  Math.round(tile.marketPrice * (0.24 + tile.upgradeLevel * 0.11))
+
+const getPassiveIncomeFromTile = (tile: GameState['tiles'][number]) => {
+  if (tile.ownerId === null) {
+    return 0
+  }
+
+  const baseYield = 0.1 + tile.upgradeLevel * 0.03
+  const strategyMultiplier = tile.strategy === 'extract' ? 1.08 : 0.92
+  return Math.max(2, Math.round(tile.currentRent * baseYield * strategyMultiplier))
+}
+
+const getPassiveIncome = (state: GameState, player: PlayerState) =>
+  getOwnedTiles(state, player.id).reduce(
+    (total, tile) => total + getPassiveIncomeFromTile(tile),
+    0,
+  )
 
 const triggerRoommatePenalty = (state: GameState, player: PlayerState) => {
   if (!player.roommateWith) {
@@ -162,36 +214,27 @@ const triggerRoommatePenalty = (state: GameState, player: PlayerState) => {
 }
 
 const liquidateAsset = (state: GameState, player: PlayerState) => {
-  if (player.ownedTileIds.length === 0) {
+  const mostValuableTile = getOwnedTiles(state, player.id).sort(
+    (left, right) => right.marketPrice - left.marketPrice,
+  )[0]
+
+  if (!mostValuableTile) {
     return false
   }
 
-  const mostValuableTileId = player.ownedTileIds
-    .map((tileId) => getTile(state, tileId))
-    .filter(Boolean)
-    .sort((a, b) => (b?.marketPrice ?? 0) - (a?.marketPrice ?? 0))[0]?.id
-
-  if (mostValuableTileId === undefined) {
-    return false
-  }
-
-  const tile = getTile(state, mostValuableTileId)
-
-  if (!tile) {
-    return false
-  }
-
-  tile.ownerId = null
-  tile.listed = false
+  mostValuableTile.ownerId = null
+  mostValuableTile.listed = false
+  mostValuableTile.upgradeLevel = 0
+  mostValuableTile.strategy = 'extract'
   player.ownedTileIds = player.ownedTileIds.filter(
-    (ownedTileId) => ownedTileId !== tile.id,
+    (ownedTileId) => ownedTileId !== mostValuableTile.id,
   )
-  player.cash += Math.round(tile.marketPrice * 0.62)
+  player.cash += Math.round(mostValuableTile.marketPrice * 0.66)
   player.livingStatus = player.ownedTileIds.length > 0 ? 'owner' : 'solo'
   addLog(
     state,
-    `${player.name} liquidated ${tile.name} for ${money(
-      tile.marketPrice * 0.62,
+    `${player.name} liquidated ${mostValuableTile.name} for ${money(
+      mostValuableTile.marketPrice * 0.66,
     )}.`,
     'warn',
   )
@@ -217,8 +260,8 @@ const defaultPlayer = (
   }
 
   player.defaultedThisRound = true
-  player.creditScore -= 26
-  player.stability -= 14
+  player.creditScore -= 20
+  player.stability -= 12
   player.survivalRounds = Math.max(player.survivalRounds, 2)
   addLog(state, `${player.name} defaulted on ${reason}.`, 'bad')
 
@@ -235,16 +278,16 @@ const issueEmergencyLoan = (
   amountNeeded: number,
   reason: string,
 ) => {
-  const riskGate = player.creditScore - player.debt * 0.18
+  const riskGate = player.creditScore - player.debt * 0.12
 
-  if (riskGate < 420) {
+  if (riskGate < 360) {
     return false
   }
 
-  const principal = Math.ceil(amountNeeded * 1.35)
+  const principal = Math.ceil(amountNeeded * 1.18)
   player.cash += principal
   player.debt += principal
-  player.creditScore -= 7
+  player.creditScore -= 5
   addLog(
     state,
     `${player.name} auto-financed ${money(principal)} to cover ${reason}.`,
@@ -314,10 +357,13 @@ const createListing = (
     return
   }
 
-  const tile = weightedPick(availableTiles)
+  const tile = weightedPick(state, availableTiles)
   tile.listed = true
   const price = Math.round(
-    tile.marketPrice * priceFactor * economy.marketDiscount * (1 + state.round * 0.05),
+    tile.marketPrice *
+      priceFactor *
+      economy.marketDiscount *
+      (1 + Math.max(0, state.round - 1) * 0.035),
   )
   const listing: MarketListing = {
     tileId: tile.id,
@@ -341,24 +387,28 @@ const processLanding = (state: GameState, player: PlayerState) => {
   }
 
   if (tile.type === 'start') {
-    player.cash += 25
+    player.cash += 32
     player.stability += 2
-    addLog(state, `${player.name} grabbed a breathing-space bonus at Payday Square.`, 'good')
+    addLog(
+      state,
+      `${player.name} grabbed a breathing-space bonus at Payday Square.`,
+      'good',
+    )
     return
   }
 
   if (tile.type === 'event') {
-    const eventRoll = randInt(1, 5)
+    const eventRoll = randInt(state, 1, 5)
 
     if (eventRoll === 1) {
-      const expense = randInt(26, 52)
+      const expense = randInt(state, 18, 42)
       settlePayment(state, player.id, expense, 'a surprise medical bill')
       addLog(state, `${player.name} ate a ${money(expense)} medical expense.`, 'bad')
       return
     }
 
     if (eventRoll === 2) {
-      const payout = randInt(40, 92)
+      const payout = randInt(state, 28, 74)
       player.cash += payout
       player.stability += 4
       addLog(state, `${player.name} caught a viral spike worth ${money(payout)}.`, 'good')
@@ -366,33 +416,37 @@ const processLanding = (state: GameState, player: PlayerState) => {
     }
 
     if (eventRoll === 3) {
-      player.stability -= 10
+      player.stability -= 8
       player.skipActions += 1
       addLog(state, `${player.name} doomscrolled into burnout.`, 'warn')
       return
     }
 
     if (eventRoll === 4) {
-      player.creditScore += 12
-      player.cash += 18
-      addLog(state, `${player.name} squeezed a tiny bureaucratic win out of the system.`, 'good')
+      player.creditScore += 10
+      player.cash += 16
+      addLog(
+        state,
+        `${player.name} squeezed a tiny bureaucratic win out of the system.`,
+        'good',
+      )
       return
     }
 
-    createListing(state, 'Flash sale', 1.04, 1)
+    createListing(state, 'Flash sale', 1.02, 1)
     addLog(state, `${player.name} uncovered a market whisper at ${tile.name}.`, 'neutral')
     return
   }
 
   if (tile.type === 'market') {
-    createListing(state, 'Auction pressure', 0.98, 2)
+    createListing(state, 'Auction pressure', 0.95, 2)
     player.stability += 3
     addLog(state, `${player.name} stirred the Auction Block.`, 'neutral')
     return
   }
 
   if (tile.ownerId === player.id) {
-    player.stability += 2
+    player.stability += tile.strategy === 'stabilize' ? 3 : 1
     addLog(state, `${player.name} landed on ${tile.name} and paid nobody.`, 'good')
     return
   }
@@ -403,6 +457,15 @@ const processLanding = (state: GameState, player: PlayerState) => {
   settlePayment(state, player.id, rent, `rent at ${tile.name}`, recipientId)
 
   if (owner) {
+    if (!owner.isHuman && tile.strategy === 'stabilize') {
+      owner.stability += 1
+    }
+
+    if (owner.isHuman) {
+      const payerTrustDelta = tile.strategy === 'stabilize' ? 2 : 0
+      player.trustInHuman += payerTrustDelta
+    }
+
     addLog(
       state,
       `${player.name} paid ${money(rent)} to ${owner.name} at ${tile.name}.`,
@@ -422,20 +485,23 @@ const movePlayer = (state: GameState, playerId: string) => {
 
   if (player.workLock > 0 || player.skipActions > 0 || player.moveCooldown > 0) {
     if (player.isHuman) {
-      addAlert(state, 'You are locked out right now. Work or burnout is eating the action window.')
+      addAlert(
+        state,
+        'You are locked out right now. Work, burnout, or cooldown is eating the move window.',
+      )
     }
     return
   }
 
-  const roll = randInt(1, 6)
+  const roll = randInt(state, 1, 6)
   const previousPosition = player.position
   player.position = (player.position + roll) % state.tiles.length
   player.moveCooldown = getMoveCooldown(player)
 
   if (player.position < previousPosition) {
-    player.cash += 40
+    player.cash += 55
     player.stability += 2
-    addLog(state, `${player.name} looped the board and banked ${money(40)}.`, 'good')
+    addLog(state, `${player.name} looped the board and banked ${money(55)}.`, 'good')
   }
 
   addLog(state, `${player.name} moved ${roll} spaces.`, player.isHuman ? 'neutral' : 'good')
@@ -452,26 +518,29 @@ const gigForPlayer = (state: GameState, playerId: string) => {
 
   if (player.workLock > 0 || player.skipActions > 0 || player.gigCooldown > 0) {
     if (player.isHuman) {
-      addAlert(state, 'No gig slot available. You are either working, burned out, or on cooldown.')
+      addAlert(
+        state,
+        'No gig slot available. You are either working, burned out, or on cooldown.',
+      )
     }
     return
   }
 
   const economy = getEconomySnapshot(state.activeEffects)
   const job = JOBS[player.jobId]
-  let payout = randInt(28, 68)
+  let payout = randInt(state, 24, 56)
   payout *= 1 + job.gigBonus
   payout *= economy.gigMultiplier
 
   if (player.survivalRounds > 0) {
-    payout *= 0.8
+    payout *= 0.84
   }
 
-  const crash = chance(0.14)
-  const stabilityCost = randInt(3, 6)
+  const crash = chance(state, 0.11)
+  const stabilityCost = randInt(state, 2, 5)
 
   if (crash) {
-    payout *= 0.55
+    payout *= 0.6
     player.stability -= stabilityCost + 2
     addLog(state, `${player.name} took a low-rated gig hit.`, 'warn')
   } else {
@@ -490,22 +559,22 @@ const getLoanRate = (
   size: LoanSize,
 ) => {
   const economy = getEconomySnapshot(state.activeEffects)
-  let rate = size === 'small' ? 0.08 : 0.12
+  let rate = size === 'small' ? 0.06 : 0.09
 
   if (player.creditScore > 720) {
-    rate -= 0.02
+    rate -= 0.015
   }
 
   if (player.creditScore < 620) {
-    rate += 0.03
+    rate += 0.025
   }
 
-  if (player.debt > 450) {
-    rate += 0.02
+  if (player.debt > 500) {
+    rate += 0.015
   }
 
   rate += economy.interestDelta
-  return clamp(rate, 0.04, 0.2)
+  return clamp(rate, 0.035, 0.16)
 }
 
 const takeLoan = (state: GameState, playerId: string, size: LoanSize) => {
@@ -515,11 +584,11 @@ const takeLoan = (state: GameState, playerId: string, size: LoanSize) => {
     return
   }
 
-  const principal = size === 'small' ? 110 : 220
+  const principal = size === 'small' ? 95 : 190
   const approved =
     size === 'small'
-      ? player.creditScore > 480
-      : player.creditScore > 620 && player.debt < 620 && player.survivalRounds === 0
+      ? player.creditScore > 450
+      : player.creditScore > 600 && player.debt < 540 && player.survivalRounds === 0
 
   if (!approved) {
     if (player.isHuman) {
@@ -531,11 +600,13 @@ const takeLoan = (state: GameState, playerId: string, size: LoanSize) => {
 
   player.cash += principal
   player.debt += principal
-  player.creditScore -= size === 'small' ? 4 : 9
+  player.creditScore -= size === 'small' ? 4 : 8
   const rate = getLoanRate(state, player, size)
   addLog(
     state,
-    `${player.name} took a ${size} loan: ${money(principal)} at ${Math.round(rate * 100)}% round interest.`,
+    `${player.name} took a ${size} loan: ${money(principal)} at ${Math.round(
+      rate * 100,
+    )}% round interest.`,
     'warn',
   )
   normalizePlayerState(player)
@@ -568,6 +639,8 @@ const buyListing = (state: GameState, playerId: string, tileId: number) => {
   player.ownedTileIds.push(tile.id)
   tile.ownerId = player.id
   tile.listed = false
+  tile.upgradeLevel = 0
+  tile.strategy = 'extract'
   state.marketListings = state.marketListings.filter((item) => item.tileId !== tileId)
 
   if (player.roommateWith) {
@@ -583,6 +656,61 @@ const buyListing = (state: GameState, playerId: string, tileId: number) => {
   player.stability += 6
   addLog(state, `${player.name} bought ${tile.name} for ${money(listing.price)}.`, 'good')
   normalizePlayerState(player)
+}
+
+const upgradeProperty = (state: GameState, playerId: string, tileId: number) => {
+  const player = getPlayer(state, playerId)
+  const tile = getTile(state, tileId)
+
+  if (!player || !tile || tile.ownerId !== playerId) {
+    return
+  }
+
+  if (tile.upgradeLevel >= MAX_PROPERTY_UPGRADE) {
+    if (player.isHuman) {
+      addAlert(state, `${tile.name} is already fully upgraded.`)
+    }
+    return
+  }
+
+  const cost = getUpgradeCost(tile)
+
+  if (player.cash < cost) {
+    if (player.isHuman) {
+      addAlert(state, `You need ${money(cost)} to upgrade ${tile.name}.`)
+    }
+    return
+  }
+
+  player.cash -= cost
+  tile.upgradeLevel += 1
+  player.stability += 2
+  addLog(
+    state,
+    `${player.name} upgraded ${tile.name} to level ${tile.upgradeLevel}.`,
+    'good',
+  )
+}
+
+const setPropertyStrategy = (
+  state: GameState,
+  playerId: string,
+  tileId: number,
+  strategy: PropertyStrategy,
+) => {
+  const player = getPlayer(state, playerId)
+  const tile = getTile(state, tileId)
+
+  if (!player || !tile || tile.ownerId !== playerId) {
+    return
+  }
+
+  tile.strategy = strategy
+  addLog(
+    state,
+    `${player.name} switched ${tile.name} to ${strategy === 'extract' ? 'cash extraction' : 'stabilized housing'}.`,
+    strategy === 'extract' ? 'warn' : 'good',
+  )
 }
 
 const requestRoommatePact = (state: GameState, partnerId: string) => {
@@ -603,12 +731,13 @@ const requestRoommatePact = (state: GameState, partnerId: string) => {
     return
   }
 
-  let acceptChance = 0.45
-  acceptChance += partner.archetype === 'social' ? 0.25 : 0
-  acceptChance += partner.cash < 140 ? 0.18 : 0
-  acceptChance += partner.stability < 55 ? 0.1 : 0
+  let acceptChance = 0.42
+  acceptChance += partner.archetype === 'social' ? 0.22 : 0
+  acceptChance += partner.cash < 150 ? 0.14 : 0
+  acceptChance += partner.stability < 58 ? 0.08 : 0
+  acceptChance += partner.trustInHuman / 200
 
-  if (!chance(acceptChance)) {
+  if (!chance(state, acceptChance)) {
     partner.trustInHuman -= 8
     addLog(state, `${partner.name} rejected the roommate pitch.`, 'warn')
     addAlert(state, `${partner.name} passed on the roommate deal.`)
@@ -619,8 +748,32 @@ const requestRoommatePact = (state: GameState, partnerId: string) => {
   human.livingStatus = 'roommates'
   partner.roommateWith = human.id
   partner.livingStatus = 'roommates'
-  partner.trustInHuman += 6
+  partner.trustInHuman += 8
   addLog(state, `${human.name} and ${partner.name} started splitting rent.`, 'good')
+}
+
+const sendSupport = (state: GameState, partnerId: string) => {
+  const human = getHuman(state)
+  const partner = getPlayer(state, partnerId)
+
+  if (!human || !partner || partner.isHuman) {
+    return
+  }
+
+  if (human.cash < SUPPORT_TRANSFER) {
+    addAlert(state, `You need ${money(SUPPORT_TRANSFER)} to send support.`)
+    return
+  }
+
+  human.cash -= SUPPORT_TRANSFER
+  partner.cash += SUPPORT_TRANSFER
+  partner.trustInHuman += 12
+  human.stability += 2
+  addLog(
+    state,
+    `You sent ${partner.name} ${money(SUPPORT_TRANSFER)}. Trust went up.`,
+    'good',
+  )
 }
 
 const requestBridgeLoan = (state: GameState) => {
@@ -636,7 +789,7 @@ const requestBridgeLoan = (state: GameState) => {
   }
 
   const lenders = state.players
-    .filter((player) => !player.isHuman && player.cash >= 110 && player.trustInHuman >= 40)
+    .filter((player) => !player.isHuman && player.cash >= 90 && player.trustInHuman >= 40)
     .sort(
       (left, right) =>
         right.cash + right.trustInHuman * 2 - (left.cash + left.trustInHuman * 2),
@@ -649,7 +802,7 @@ const requestBridgeLoan = (state: GameState) => {
     return
   }
 
-  const amount = clamp(Math.round(lender.cash * 0.22), 45, 90)
+  const amount = clamp(Math.round(lender.cash * 0.18), 35, 72)
   lender.cash -= amount
   human.cash += amount
   human.peerLoan = {
@@ -708,19 +861,45 @@ const maybeBuyForAi = (state: GameState, player: PlayerState) => {
   }
 
   const appetiteByArchetype: Record<Archetype, number> = {
-    stability: 0.18,
-    opportunist: 0.32,
-    social: 0.14,
-    'asset-hunter': 0.48,
+    stability: 0.16,
+    opportunist: 0.28,
+    social: 0.12,
+    'asset-hunter': 0.46,
   }
 
   if (player.cash < listing.price) {
     return
   }
 
-  if (chance(appetiteByArchetype[player.archetype])) {
+  if (chance(state, appetiteByArchetype[player.archetype])) {
     buyListing(state, player.id, listing.tileId)
   }
+}
+
+const maybeManageAiProperties = (state: GameState, player: PlayerState) => {
+  const ownedTiles = getOwnedTiles(state, player.id)
+
+  if (ownedTiles.length === 0) {
+    return
+  }
+
+  ownedTiles.forEach((tile) => {
+    if (
+      tile.upgradeLevel < MAX_PROPERTY_UPGRADE &&
+      player.cash > getUpgradeCost(tile) + 90 &&
+      chance(state, player.archetype === 'asset-hunter' ? 0.42 : 0.18)
+    ) {
+      upgradeProperty(state, player.id, tile.id)
+    }
+
+    if (player.archetype === 'stability' && chance(state, 0.4)) {
+      setPropertyStrategy(state, player.id, tile.id, 'stabilize')
+    }
+
+    if (player.archetype === 'opportunist' && chance(state, 0.4)) {
+      setPropertyStrategy(state, player.id, tile.id, 'extract')
+    }
+  })
 }
 
 const maybePairAiRoommates = (state: GameState) => {
@@ -733,13 +912,11 @@ const maybePairAiRoommates = (state: GameState) => {
       player.cash < 150,
   )
 
-  if (eligiblePlayers.length < 2 || !chance(0.28)) {
+  if (eligiblePlayers.length < 2 || !chance(state, 0.22)) {
     return
   }
 
-  const [left, right] = eligiblePlayers
-    .sort(() => Math.random() - 0.5)
-    .slice(0, 2)
+  const [left, right] = shuffle(state, eligiblePlayers).slice(0, 2)
 
   left.roommateWith = right.id
   right.roommateWith = left.id
@@ -750,16 +927,16 @@ const maybePairAiRoommates = (state: GameState) => {
 
 const maybeTriggerGlobalEvent = (state: GameState) => {
   if (state.round % 2 !== 0) {
-    state.currentHeadline = null
+    state.currentHeadline = 'No major shock'
     return
   }
 
-  const eventRoll = randInt(1, 6)
+  const eventRoll = randInt(state, 1, 6)
 
   if (eventRoll === 1) {
     state.tiles.forEach((tile) => {
       if (tile.type === 'property') {
-        tile.currentRent = Math.round(tile.currentRent * 1.14)
+        tile.currentRent = Math.round(tile.currentRent * 1.08)
       }
     })
     state.currentHeadline = 'Rent spike'
@@ -769,11 +946,11 @@ const maybeTriggerGlobalEvent = (state: GameState) => {
 
   if (eventRoll === 2) {
     state.activeEffects.push({
-      id: toneId(),
+      id: nextId(state, 'effect'),
       title: 'Recession',
       description: 'Stable income shrinks for two rounds.',
       remainingRounds: 2,
-      incomeMultiplier: 0.82,
+      incomeMultiplier: 0.9,
     })
     state.currentHeadline = 'Recession'
     addLog(state, 'Global event: recession. Salaries just got clipped.', 'warn')
@@ -782,11 +959,11 @@ const maybeTriggerGlobalEvent = (state: GameState) => {
 
   if (eventRoll === 3) {
     state.activeEffects.push({
-      id: toneId(),
+      id: nextId(state, 'effect'),
       title: 'Tech boom',
       description: 'Gig work pays better for two rounds.',
       remainingRounds: 2,
-      gigMultiplier: 1.35,
+      gigMultiplier: 1.22,
     })
     state.currentHeadline = 'Tech boom'
     addLog(state, 'Global event: tech boom. Side hustles are suddenly worth it.', 'good')
@@ -795,11 +972,11 @@ const maybeTriggerGlobalEvent = (state: GameState) => {
 
   if (eventRoll === 4) {
     state.activeEffects.push({
-      id: toneId(),
+      id: nextId(state, 'effect'),
       title: 'Rate hike',
       description: 'Debt compounds harder for two rounds.',
       remainingRounds: 2,
-      interestDelta: 0.03,
+      interestDelta: 0.02,
     })
     state.currentHeadline = 'Rate hike'
     addLog(state, 'Global event: rate hike. Borrowing just got uglier.', 'bad')
@@ -808,14 +985,14 @@ const maybeTriggerGlobalEvent = (state: GameState) => {
 
   if (eventRoll === 5) {
     state.activeEffects.push({
-      id: toneId(),
+      id: nextId(state, 'effect'),
       title: 'Mutual aid weekend',
       description: 'Living costs drop briefly.',
       remainingRounds: 1,
-      livingCostMultiplier: 0.84,
+      livingCostMultiplier: 0.85,
     })
     state.players.forEach((player) => {
-      player.stability += 5
+      player.stability += 4
     })
     state.currentHeadline = 'Mutual aid weekend'
     addLog(state, 'Global event: mutual aid weekend. The floor softened, briefly.', 'good')
@@ -823,33 +1000,37 @@ const maybeTriggerGlobalEvent = (state: GameState) => {
   }
 
   state.activeEffects.push({
-    id: toneId(),
+    id: nextId(state, 'effect'),
     title: 'Buyer panic',
     description: 'Market listings get cheaper for one round.',
     remainingRounds: 1,
-    marketDiscount: 0.86,
+    marketDiscount: 0.9,
   })
-  createListing(state, 'Panic listing', 0.93, 1)
+  createListing(state, 'Panic listing', 0.9, 1)
   state.currentHeadline = 'Buyer panic'
   addLog(state, 'Global event: buyer panic. The market blinked.', 'good')
 }
 
 const maybeTriggerPersonalEvent = (state: GameState, player: PlayerState) => {
-  if (!chance(0.34)) {
+  if (!chance(state, 0.24)) {
     return
   }
 
-  const eventRoll = randInt(1, 4)
+  const eventRoll = randInt(state, 1, 4)
 
   if (eventRoll === 1) {
-    const expense = randInt(35, 70)
+    const expense = randInt(state, 22, 52)
     settlePayment(state, player.id, expense, 'a personal emergency')
-    addLog(state, `${player.name} got hit by a personal emergency for ${money(expense)}.`, 'bad')
+    addLog(
+      state,
+      `${player.name} got hit by a personal emergency for ${money(expense)}.`,
+      'bad',
+    )
     return
   }
 
   if (eventRoll === 2) {
-    const payout = randInt(45, 105)
+    const payout = randInt(state, 35, 82)
     player.cash += payout
     player.stability += 6
     addLog(state, `${player.name} cashed in a rare positive spike for ${money(payout)}.`, 'good')
@@ -857,14 +1038,14 @@ const maybeTriggerPersonalEvent = (state: GameState, player: PlayerState) => {
   }
 
   if (eventRoll === 3) {
-    player.stability -= 12
+    player.stability -= 10
     player.skipActions += 1
     addLog(state, `${player.name} hit a burnout wall.`, 'warn')
     return
   }
 
-  player.creditScore += 16
-  player.cash += 20
+  player.creditScore += 14
+  player.cash += 18
   addLog(state, `${player.name} found a temporary cushion and credit relief.`, 'good')
 }
 
@@ -891,19 +1072,19 @@ const resolvePeerLoanDeadline = (state: GameState) => {
 
 const updateScores = (state: GameState) => {
   state.players.forEach((player) => {
-    const assetValue = player.ownedTileIds.reduce((sum, tileId) => {
-      const tile = getTile(state, tileId)
-      return sum + (tile?.marketPrice ?? 0)
-    }, 0)
+    const assetValue = getOwnedTiles(state, player.id).reduce(
+      (sum, tile) =>
+        sum + tile.marketPrice + tile.upgradeLevel * Math.round(tile.marketPrice * 0.08),
+      0,
+    )
 
     const netWorth = player.cash + assetValue - player.debt
-    const debtRatio =
-      player.debt / Math.max(player.cash + assetValue, 1)
+    const debtRatio = Math.min(5, player.debt / Math.max(player.cash + assetValue, 1))
     player.score = Math.round(
-      netWorth * 1.2 -
-        debtRatio * 70 +
-        player.stability * 2 +
-        player.ownedTileIds.length * 85,
+      netWorth * 1.08 -
+        debtRatio * 42 +
+        player.stability * 3 +
+        player.ownedTileIds.length * 95,
     )
   })
 }
@@ -925,6 +1106,39 @@ const closeExpiredListings = (state: GameState) => {
   )
 }
 
+const createRoundSummary = (state: GameState): RoundSummary => {
+  const notes = state.logs
+    .filter((entry) => entry.round === state.round)
+    .slice(0, 3)
+    .map((entry) => entry.message)
+
+  return {
+    id: nextId(state, 'summary'),
+    round: state.round,
+    headline: state.currentHeadline,
+    notes,
+    players: [...state.players]
+      .sort((left, right) => right.score - left.score)
+      .map((player) => ({
+        id: player.id,
+        name: player.name,
+        cash: player.cash,
+        debt: player.debt,
+        stability: player.stability,
+        score: player.score,
+        ownedAssets: player.ownedTileIds.length,
+        livingStatus: player.livingStatus,
+      })),
+  }
+}
+
+const recordRoundSummary = (state: GameState) => {
+  state.roundSummaries = [createRoundSummary(state), ...state.roundSummaries].slice(
+    0,
+    MAX_ROUND_SUMMARIES,
+  )
+}
+
 const advanceRound = (state: GameState) => {
   const economy = getEconomySnapshot(state.activeEffects)
 
@@ -933,11 +1147,11 @@ const advanceRound = (state: GameState) => {
     let salary = job.salary * economy.incomeMultiplier
 
     if (player.stability < 35) {
-      salary *= 0.84
+      salary *= 0.88
     }
 
     if (player.survivalRounds > 0) {
-      salary *= 0.72
+      salary *= 0.8
       player.survivalRounds -= 1
     }
 
@@ -951,6 +1165,13 @@ const advanceRound = (state: GameState) => {
       player.debt = Math.round(player.debt * (1 + rate))
     }
 
+    const stabilizedCount = getOwnedTiles(state, player.id).filter(
+      (tile) => tile.strategy === 'stabilize',
+    ).length
+    if (stabilizedCount > 0) {
+      player.stability += stabilizedCount
+    }
+
     maybeTriggerPersonalEvent(state, player)
     normalizePlayerState(player)
   })
@@ -960,8 +1181,10 @@ const advanceRound = (state: GameState) => {
       return
     }
 
-    const growthMultiplier = 1 + tile.growth + economy.rentGrowthBonus
-    tile.currentRent = Math.round(tile.currentRent * growthMultiplier)
+    const strategyShift = tile.strategy === 'extract' ? 0.015 : -0.01
+    const upgradeShift = tile.upgradeLevel * 0.01
+    const growthMultiplier = 1 + tile.growth + economy.rentGrowthBonus + strategyShift + upgradeShift
+    tile.currentRent = Math.max(tile.baseRent, Math.round(tile.currentRent * growthMultiplier))
   })
 
   state.activeEffects = state.activeEffects
@@ -977,14 +1200,18 @@ const advanceRound = (state: GameState) => {
   resolvePeerLoanDeadline(state)
 
   if (state.round % 3 === 0) {
-    createListing(state, 'Scheduled auction', 1.08, 2)
+    createListing(state, 'Scheduled auction', 1.02, 2)
   }
 
   state.players
     .filter((player) => !player.isHuman)
-    .forEach((player) => maybeBuyForAi(state, player))
+    .forEach((player) => {
+      maybeBuyForAi(state, player)
+      maybeManageAiProperties(state, player)
+    })
 
   updateScores(state)
+  recordRoundSummary(state)
 
   if (state.round >= state.totalRounds) {
     state.phase = 'finished'
@@ -1022,31 +1249,33 @@ const maybeActForAi = (state: GameState, player: PlayerState) => {
     return
   }
 
-  const lowCash = player.cash < 70
+  const lowCash = player.cash < 55
   const shouldGig = lowCash || player.archetype === 'opportunist'
   const moveBias: Record<Archetype, number> = {
-    stability: 0.7,
-    opportunist: 0.84,
-    social: 0.66,
-    'asset-hunter': 0.72,
+    stability: 0.68,
+    opportunist: 0.82,
+    social: 0.62,
+    'asset-hunter': 0.7,
   }
 
-  if (player.moveCooldown === 0 && chance(moveBias[player.archetype])) {
+  if (player.moveCooldown === 0 && chance(state, moveBias[player.archetype])) {
     movePlayer(state, player.id)
     return
   }
 
-  if (player.gigCooldown === 0 && shouldGig && chance(0.68)) {
+  if (player.gigCooldown === 0 && shouldGig && chance(state, 0.62)) {
     gigForPlayer(state, player.id)
     return
   }
 
-  if (player.cash < 45 && chance(0.45)) {
+  if (player.cash < 40 && chance(state, 0.4)) {
     takeLoan(state, player.id, player.creditScore > 650 ? 'large' : 'small')
   }
 }
 
 export const createInitialGame = (config: GameConfig): GameState => {
+  const seed = createSeedFromText(config.seed)
+
   const aiPlayers = AI_ROSTER.slice(0, config.aiCount).map((profile, index) => ({
     id: profile.id,
     name: profile.name,
@@ -1054,10 +1283,10 @@ export const createInitialGame = (config: GameConfig): GameState => {
     isHuman: false,
     archetype: profile.archetype,
     jobId: profile.jobId,
-    cash: 220 - index * 12,
-    debt: 120 + index * 28,
-    creditScore: 650 - index * 16,
-    stability: 66 - index * 3,
+    cash: 225 - index * 10,
+    debt: 92 + index * 22,
+    creditScore: 660 - index * 14,
+    stability: 68 - index * 2,
     position: (index + 2) % TILE_DEFINITIONS.length,
     moveCooldown: index % 2,
     gigCooldown: 0,
@@ -1068,7 +1297,7 @@ export const createInitialGame = (config: GameConfig): GameState => {
     roommateWith: null,
     defaultedThisRound: false,
     ownedTileIds: [],
-    trustInHuman: 58,
+    trustInHuman: 55,
     score: 0,
   }))
 
@@ -1079,10 +1308,10 @@ export const createInitialGame = (config: GameConfig): GameState => {
     isHuman: true,
     archetype: 'social',
     jobId: config.jobId,
-    cash: 240,
-    debt: 135,
-    creditScore: 682,
-    stability: 72,
+    cash: 265,
+    debt: 95,
+    creditScore: 690,
+    stability: 74,
     position: 0,
     moveCooldown: 0,
     gigCooldown: 0,
@@ -1099,7 +1328,13 @@ export const createInitialGame = (config: GameConfig): GameState => {
 
   const state: GameState = {
     phase: 'running',
-    config,
+    config: {
+      ...config,
+      seed: normalizeSeed(config.seed),
+    },
+    seed,
+    rngState: seed,
+    nextId: 1,
     round: 1,
     totalRounds: config.totalRounds,
     tick: 0,
@@ -1110,13 +1345,16 @@ export const createInitialGame = (config: GameConfig): GameState => {
       currentRent: tile.baseRent,
       ownerId: null,
       listed: false,
+      upgradeLevel: 0,
+      strategy: 'extract',
     })),
     players: [humanPlayer, ...aiPlayers],
     marketListings: [],
     activeEffects: [],
-    currentHeadline: 'Prototype speed',
-    alerts: ['Client-only prototype: React front end tuned for GitHub Pages deployment.'],
+    currentHeadline: 'Opening week',
+    alerts: [`Seed locked: ${normalizeSeed(config.seed)}`],
     logs: [],
+    roundSummaries: [],
     winnerId: null,
   }
 
@@ -1128,6 +1366,20 @@ export const createInitialGame = (config: GameConfig): GameState => {
   addLog(state, 'Every property starts owned by The Market.', 'warn')
   updateScores(state)
   return state
+}
+
+const finalizeTickState = (state: GameState) => {
+  const human = getHuman(state)
+  if (human) {
+    const economy = getEconomySnapshot(state.activeEffects)
+    const nextBill = getLivingCost(human, economy.livingCostMultiplier)
+    if (human.cash < nextBill && human.creditScore < 520) {
+      addAlert(state, 'Default risk: the next living-cost tick may break you.')
+    }
+    if (human.peerLoan && human.peerLoan.dueRound === state.round) {
+      addAlert(state, 'Bridge loan due this round. Trust expires fast.')
+    }
+  }
 }
 
 export const advanceTick = (game: GameState) => {
@@ -1154,69 +1406,71 @@ export const advanceTick = (game: GameState) => {
     advanceRound(next)
   }
 
-  const human = getHuman(next)
-  if (human) {
-    const economy = getEconomySnapshot(next.activeEffects)
-    const nextBill = getLivingCost(human, economy.livingCostMultiplier)
-    if (human.cash < nextBill && human.creditScore < 520) {
-      addAlert(next, 'Default risk: the next living-cost tick may break you.')
-    }
-    if (human.peerLoan && human.peerLoan.dueRound === next.round) {
-      addAlert(next, 'Bridge loan due this round. Trust expires fast.')
-    }
-  }
-
+  finalizeTickState(next)
   return next
 }
 
-export const performMove = (game: GameState) => {
+const cloneAndApply = (game: GameState, work: (next: GameState) => void) => {
   const next = structuredClone(game)
-  movePlayer(next, HUMAN_ID)
+  work(next)
   updateScores(next)
+  finalizeTickState(next)
   return next
 }
 
-export const performGig = (game: GameState) => {
-  const next = structuredClone(game)
-  gigForPlayer(next, HUMAN_ID)
-  updateScores(next)
-  return next
-}
+export const performMove = (game: GameState) =>
+  cloneAndApply(game, (next) => {
+    movePlayer(next, HUMAN_ID)
+  })
 
-export const performLoan = (game: GameState, size: LoanSize) => {
-  const next = structuredClone(game)
-  takeLoan(next, HUMAN_ID, size)
-  updateScores(next)
-  return next
-}
+export const performGig = (game: GameState) =>
+  cloneAndApply(game, (next) => {
+    gigForPlayer(next, HUMAN_ID)
+  })
 
-export const performBuyout = (game: GameState, tileId: number) => {
-  const next = structuredClone(game)
-  buyListing(next, HUMAN_ID, tileId)
-  updateScores(next)
-  return next
-}
+export const performLoan = (game: GameState, size: LoanSize) =>
+  cloneAndApply(game, (next) => {
+    takeLoan(next, HUMAN_ID, size)
+  })
 
-export const performRoommateRequest = (game: GameState, partnerId: string) => {
-  const next = structuredClone(game)
-  requestRoommatePact(next, partnerId)
-  updateScores(next)
-  return next
-}
+export const performBuyout = (game: GameState, tileId: number) =>
+  cloneAndApply(game, (next) => {
+    buyListing(next, HUMAN_ID, tileId)
+  })
 
-export const performBridgeLoanRequest = (game: GameState) => {
-  const next = structuredClone(game)
-  requestBridgeLoan(next)
-  updateScores(next)
-  return next
-}
+export const performRoommateRequest = (game: GameState, partnerId: string) =>
+  cloneAndApply(game, (next) => {
+    requestRoommatePact(next, partnerId)
+  })
 
-export const performBridgeRepayment = (game: GameState) => {
-  const next = structuredClone(game)
-  repayBridgeLoan(next)
-  updateScores(next)
-  return next
-}
+export const performSupportTransfer = (game: GameState, partnerId: string) =>
+  cloneAndApply(game, (next) => {
+    sendSupport(next, partnerId)
+  })
+
+export const performBridgeLoanRequest = (game: GameState) =>
+  cloneAndApply(game, (next) => {
+    requestBridgeLoan(next)
+  })
+
+export const performBridgeRepayment = (game: GameState) =>
+  cloneAndApply(game, (next) => {
+    repayBridgeLoan(next)
+  })
+
+export const performPropertyUpgrade = (game: GameState, tileId: number) =>
+  cloneAndApply(game, (next) => {
+    upgradeProperty(next, HUMAN_ID, tileId)
+  })
+
+export const performPropertyStrategy = (
+  game: GameState,
+  tileId: number,
+  strategy: PropertyStrategy,
+) =>
+  cloneAndApply(game, (next) => {
+    setPropertyStrategy(next, HUMAN_ID, tileId, strategy)
+  })
 
 export const formatMoney = (value: number) => money(value)
 
@@ -1238,3 +1492,33 @@ export const getPassiveIncomeValue = (state: GameState, player: PlayerState) =>
 
 export const getRoundInterestRate = (state: GameState, player: PlayerState) =>
   getLoanRate(state, player, 'small')
+
+export const getOwnedProperties = (state: GameState, playerId: string) =>
+  getOwnedTiles(state, playerId)
+
+export const getPropertyUpgradeCost = (state: GameState, tileId: number) => {
+  const tile = getTile(state, tileId)
+  return tile ? getUpgradeCost(tile) : 0
+}
+
+export const getPropertyPassiveIncomeValue = (state: GameState, tileId: number) => {
+  const tile = getTile(state, tileId)
+  return tile ? getPassiveIncomeFromTile(tile) : 0
+}
+
+export const createLastMatchSnapshot = (state: GameState): LastMatchSnapshot | null => {
+  if (state.phase !== 'finished') {
+    return null
+  }
+
+  const winner = state.players.find((player) => player.id === state.winnerId) ?? state.players[0]
+
+  return {
+    seed: state.config.seed,
+    finishedAt: new Date().toISOString(),
+    totalRounds: state.totalRounds,
+    winnerName: winner?.name ?? 'Nobody',
+    winnerScore: winner?.score ?? 0,
+    summaries: state.roundSummaries,
+  }
+}

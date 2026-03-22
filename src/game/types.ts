@@ -14,6 +14,8 @@ export type LoanSize = 'small' | 'large'
 
 export type Tone = 'good' | 'neutral' | 'warn' | 'bad'
 
+export type PropertyStrategy = 'extract' | 'stabilize'
+
 export interface JobProfile {
   id: JobId
   name: string
@@ -41,6 +43,8 @@ export interface TileState extends TileDefinition {
   currentRent: number
   ownerId: string | null
   listed: boolean
+  upgradeLevel: number
+  strategy: PropertyStrategy
 }
 
 export interface ActiveEffect {
@@ -107,11 +111,43 @@ export interface GameConfig {
   jobId: JobId
   totalRounds: number
   aiCount: number
+  seed: string
+}
+
+export interface RoundPlayerSnapshot {
+  id: string
+  name: string
+  cash: number
+  debt: number
+  stability: number
+  score: number
+  ownedAssets: number
+  livingStatus: PlayerState['livingStatus']
+}
+
+export interface RoundSummary {
+  id: string
+  round: number
+  headline: string | null
+  notes: string[]
+  players: RoundPlayerSnapshot[]
+}
+
+export interface LastMatchSnapshot {
+  seed: string
+  finishedAt: string
+  totalRounds: number
+  winnerName: string
+  winnerScore: number
+  summaries: RoundSummary[]
 }
 
 export interface GameState {
   phase: 'running' | 'finished'
   config: GameConfig
+  seed: number
+  rngState: number
+  nextId: number
   round: number
   totalRounds: number
   tick: number
@@ -124,5 +160,6 @@ export interface GameState {
   currentHeadline: string | null
   alerts: string[]
   logs: LogEntry[]
+  roundSummaries: RoundSummary[]
   winnerId: string | null
 }

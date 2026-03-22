@@ -61,9 +61,22 @@
 .roommate-card p,
 .leaderboard-card p,
 .log-entry p,
-.overlay__card p {
+.overlay__card p,
+.summary-card p,
+.hint-card p,
+.property-card p,
+.guide-card p,
+.last-match__item span {
   color: var(--muted);
   line-height: 1.45;
+}
+
+code {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(29, 18, 12, 0.08);
+  font-size: 0.9em;
 }
 
 .topbar__meta {
@@ -422,7 +435,9 @@
 .stats-grid,
 .actions-grid,
 .listing-grid,
-.roommate-grid {
+.roommate-grid,
+.property-grid,
+.hint-grid {
   display: grid;
   gap: 12px;
 }
@@ -458,20 +473,45 @@
   padding-top: 2px;
 }
 
+.hint-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.hint-card,
+.summary-card,
+.property-card {
+  padding: 16px;
+  border-radius: 22px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+}
+
+.hint-card strong,
+.summary-card strong,
+.property-card h4,
+.guide-card strong {
+  font-family: var(--font-display);
+  font-size: 1.08rem;
+  text-transform: uppercase;
+}
+
 .listing-grid,
-.roommate-grid {
+.roommate-grid,
+.property-grid {
   grid-template-columns: 1fr;
 }
 
 .listing-card,
-.roommate-card {
+.roommate-card,
+.property-card {
   padding: 16px;
   display: grid;
   gap: 14px;
 }
 
 .listing-card h4,
-.roommate-card h4 {
+.roommate-card h4,
+.property-card h4 {
   font-family: var(--font-display);
   font-size: 1.25rem;
   text-transform: uppercase;
@@ -479,7 +519,12 @@
 }
 
 .listing-card__meta,
-.roommate-card__stats {
+.roommate-card__stats,
+.property-card__stats,
+.property-card__actions,
+.roommate-card__actions,
+.summary-card__top,
+.summary-card__leaders {
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -487,7 +532,9 @@
 }
 
 .listing-card--muted,
-.roommate-card--muted {
+.roommate-card--muted,
+.property-card--muted,
+.summary-card--muted {
   background: rgba(255, 252, 247, 0.58);
 }
 
@@ -537,6 +584,31 @@
 
 .panel--log {
   min-height: 420px;
+}
+
+.panel--summary {
+  min-height: 280px;
+}
+
+.summary-stream {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.summary-card__top span {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.summary-card__notes,
+.overlay__summary-list,
+.last-match__list {
+  display: grid;
+  gap: 8px;
 }
 
 .log-stream {
@@ -608,6 +680,24 @@
 
 .overlay__actions {
   justify-content: flex-end;
+}
+
+.overlay__card--guide {
+  width: min(760px, 100%);
+}
+
+.guide-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 22px 0;
+}
+
+.guide-card {
+  padding: 16px;
+  border-radius: 22px;
+  border: 1px solid var(--line);
+  background: rgba(255, 252, 247, 0.82);
 }
 
 .setup {
@@ -724,6 +814,16 @@
   gap: 12px;
 }
 
+.seed-row,
+.setup__actions {
+  display: flex;
+  gap: 12px;
+}
+
+.seed-row .secondary {
+  min-width: 132px;
+}
+
 .feature-stack {
   display: grid;
   gap: 20px;
@@ -735,6 +835,20 @@
 
 .feature-card h2 {
   margin: 10px 0 12px;
+}
+
+.feature-card--last-match {
+  background: linear-gradient(180deg, rgba(24, 99, 74, 0.08), rgba(255, 250, 243, 0.94));
+}
+
+.last-match__item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255, 252, 247, 0.7);
 }
 
 @media (max-width: 1280px) {
@@ -774,7 +888,9 @@
   .setup__stats,
   .actions-grid,
   .stats-grid,
-  .form-row {
+  .form-row,
+  .hint-grid,
+  .guide-grid {
     grid-template-columns: 1fr;
   }
 
@@ -806,7 +922,15 @@
   .leaderboard-card__top,
   .listing-card__meta,
   .roommate-card__stats,
+  .roommate-card__actions,
+  .property-card__stats,
+  .property-card__actions,
   .leaderboard-card__stats,
+  .summary-card__top,
+  .summary-card__leaders,
+  .seed-row,
+  .setup__actions,
+  .last-match__item,
   .panel__header,
   .subpanel__header {
     flex-direction: column;
