@@ -1,0 +1,83 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap');
+
+:root {
+  --bg: #f4ede2;
+  --bg-deep: #d8c8af;
+  --panel: rgba(255, 250, 242, 0.84);
+  --panel-strong: rgba(255, 247, 236, 0.96);
+  --line: rgba(39, 28, 20, 0.16);
+  --line-strong: rgba(39, 28, 20, 0.34);
+  --ink: #1d120c;
+  --muted: #705c4d;
+  --accent: #b7410e;
+  --accent-soft: rgba(183, 65, 14, 0.12);
+  --danger: #8a1c12;
+  --danger-soft: rgba(138, 28, 18, 0.12);
+  --good: #18634a;
+  --good-soft: rgba(24, 99, 74, 0.12);
+  --shadow: 0 20px 60px rgba(60, 36, 17, 0.14);
+  --font-body: 'Space Grotesk', sans-serif;
+  --font-display: 'IBM Plex Sans Condensed', sans-serif;
+  font-family: var(--font-body);
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top right, rgba(183, 65, 14, 0.18), transparent 30%),
+    radial-gradient(circle at bottom left, rgba(24, 99, 74, 0.12), transparent 24%),
+    linear-gradient(180deg, #f9f3eb 0%, #f0e6d7 100%);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(80, 54, 34, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(80, 54, 34, 0.03) 1px, transparent 1px);
+  background-size: 28px 28px;
+  opacity: 0.6;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
